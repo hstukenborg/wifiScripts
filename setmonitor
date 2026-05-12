@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+# This script is designed to setup the available interfaces in monitor mode.
+
+# Functions
+
+######
+#
+# err()
+#
+# Taken from Google Style Guide
+#
+######
+function err() {
+  echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
+}
+
+# Argument processing
+verbose='false'
+ignoreInt=''
+phyInt=''
+while getopts "ip:v" flag; do
+  case "${flag}" in
+    i) ignoreInt='true' ;;
+    p) phyInt="${OPTARG}" ;;
+    v) verbose='true' ;;
+    *) err "Invalid option: ${flag}" ;;
+  esac
+done
+
+# Set default values
+
+# In case of any external interfaces, get the list of available interfaces
+# and phy numbers, then use the last one as the base number for phy/wlan/mon. 
+# This is a bash-specific syntax that removes unwanted new lines as elements. 
+# The '-t' option for mapfile removes trailing newlines from each line read. 
+declare -a aInterfaces aPhysical
+mapfile -t aInterfaces < <(ip link show | grep wlan | awk '{print $2}' | grep -E -o '([0-9]+)')
+mapfile -t aPhysical < <(iw dev | grep phy | awk -F '\#' '{print $2}' | sort)
+
+# Check if we need to ignore the internal adapter
+if [[ -n "$ignoreInt" ]]; then
+  unset 'aInterfaces[0]'
+  unset 'aPhysical[0]'
+fi
+
+# Now create an Associative array that maps the physical and wlan interfaces, as they can be different.
+declare -A aMappedInterfaces;
+
+for i in "${!aInterfaces[@]}"; do
+  aMappedInterfaces[${aInterfaces[$i]}]=${aPhysical[$i]}
+done
+
+if [[ "$verbose" == "true" ]]; then
+  # Quick print out of the mapping
+  for i in "${!aMappedInterfaces[@]}"; do
+    err "$i is ${aMappedInterfaces[$i]}"
+  done
+fi
+
+# Loop through the array and create a matching monitor for each wlan interface
+for i in "${!aMappedInterfaces[@]}"; do
+  currentInt="wlan$i"
+  currentPhy="phy$i"
+  currentMon="mon$i"
+
+  # Enable the wlanX interface (just in case):
+  sudo ip link show "$currentInt" | grep -w UP >/dev/null || sudo ip link set "$currentInt" up
+
+  # Add physical interface mon0 set in monitor mode.
+  sudo iw phy "$currentPhy" interface add "$currentMon" type monitor
+
+  # Bring up the monX interface.
+  sudo ip link set "$currentMon" up
+
+  # Initiate a scan via wlanX, but hide the results. 
+  # NOTE: This is specifically for Intel interfaces that rely upon 
+  # Location Aware Regulatory to enable channels for a given frequency 
+  # (specifically 6 GHz).
+  sudo iw "$currentInt" scan > /dev/null
+
+  # Set the region to US (by default):
+  sudo iw reg set US
+
+  # bring down wlanX interface before attempting to capture traffic on monX.
+  sudo ip link set "$currentInt" down
+done
+
+# ensure NetworkManager service is down
+#sudo systemctl stop NetworkManager 2>/dev/null

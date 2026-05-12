@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+
+# Get a quick wireless scan
+sudo wpa_cli scan 2>/dev/null
+sudo wpa_cli scan_results 2>/dev/null

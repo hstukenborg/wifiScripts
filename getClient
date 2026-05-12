@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# Small tool to quickly calculate center frequency for a given 
+# channel and width on a specified band.
+#
+
+#
+# Forumlas
+#
+##############################################################################################################
+# 2.4 GHz
+# Basic Formula: Frequency (MHz) = (Channel Number × 5) + 2407 (with adjustments for specific channels).
+# [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5.
+#
+# 5 GHz
+# Basic Formula (UNII-1): Frequency (MHz): (Channel Number × 5) + 5000 (or a base offset like 5170 for channel
+# 34).
+# [Wi-Fi 7]: Center Frequency = 5000 + (Channel Number * 5). For example, ch44 == 44*5 = 220 + 5000 == 5220.
+# 
+# 6 GHz
+# Basic Forumla: Center Frequency = 5950 + (5 * Channel Number).
+##############################################################################################################
+
+
+######
+#
+# err()
+#
+# Taken from Google Style Guide
+#
+######
+function err() {
+  echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
+}
+
+# Calculate 2.4 GHz
+# Basic Formula: Frequency (MHz) = (Channel Number × 5) + 2407 (with adjustments for specific channels).
+# [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5.
+function calcCenterFreq() {
+  local -i lChannel=$1
+  local -i cFrequency
+
+  case "${band}" in
+    24) cFrequency=$((lChannel - 1 * 5 + 2412)) ;;
+    50) cFrequency=$((lChannel * 5 + 5000)) ;;
+    60) cFrequency=$((lChannel * 5 + 5950)) ;;
+    *) err "Invalid Channel" ;;
+  esac
+
+  echo "$cFrequency"
+}
+
+# getChannelFromFrequency
+#
+# This function returns the channel number for a given frequency, band, and width.
+#
+function getChannelFromFrequency() {
+  local -i lFrequency=$1
+  local -i cChannel
+
+  case "${band}" in
+    24) cChannel=$(((lFrequency-2407) / 5)) ;;
+    50) cChannel=$(((lFrequency-5000) / 5)) ;;
+    60) cChannel=$(((lFrequency-5950) / 5)) ;;
+    *) err "Invalid Frequency" ;;
+  esac
+
+  echo "$cChannel"
+}
+
+#
+# Argument processing
+verbose='false'
+startChannel=''
+startFrequency=''
+band='24'
+while getopts "f:c:b:v" opt; do
+  case $opt in
+    c)
+    startChannel="$OPTARG" 
+    #echo "Specified channel: $startChannel"
+    ;;
+    f)
+    startFrequency="$OPTARG"
+    ;;
+    b)
+    band="$OPTARG" 
+    #echo "Specified band: $band"
+    ;;
+    v)
+    verbose='true' 
+    ;;
+    *)
+    err "Invalid option: ${opt}" 
+    ;;
+  esac
+done
+
+clientChannel=''
+centerFrequency=''
+
+if [[ "$verbose" == "true" ]]; then
+  echo "Channel == $startChannel"
+  echo "Band == $band"
+fi
+
+if [[ -n "$startChannel" ]]; then
+  centerFrequency=$(calcCenterFreq "${startChannel}")
+  # Print out the center frequency
+  echo "$centerFrequency"
+elif [[ -n "$startFrequency" ]]; then
+  clientChannel=$(getChannelFromFrequency "${startFrequency}")
+  # Print out the client channel
+  echo "$clientChannel"
+fi  
+

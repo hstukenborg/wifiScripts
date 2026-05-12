@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+# This script sets the frequency of the specified channel for the specified 
+# adapter, or defaults to mon0 if no adapter is specified.
+
+######
+#
+# err()
+#
+# Taken from Google Style Guide
+#
+######
+function err() {
+  echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
+}
+
+# Argument processing
+verbose='false'
+
+while getopts "ip:v" flag; do
+  case "${flag}" in
+    i) ignoreInt='true' ;;
+    p) phyInt="${OPTARG}" ;;
+    v) verbose='true' ;;
+    *) err "Invalid option: ${flag}" ;;
+  esac
+done
+
+# Issue command based on the requested channel
+case "$1" in
+
+	181)
+		iw phy phy0 set freq 6855 80 6865
+		;;
+	197)
+		iw phy phy0 set freq 6935 80 6945
+		;;
+	213)
+		iw phy phy0 set freq 7015 80 7025
+		;;
+	44)	iw phy phy0 set freq 5220 40 5230
+		;;
+	*)
+		echo "Unknown channel."
+		;;
+esac
