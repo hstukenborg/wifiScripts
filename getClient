@@ -99,18 +99,31 @@ done
 clientChannel=''
 centerFrequency=''
 
-if [[ "$verbose" == "true" ]]; then
-  echo "Channel == $startChannel"
-  echo "Band == $band"
-fi
 
 if [[ -n "$startChannel" ]]; then
   centerFrequency=$(calcCenterFreq "${startChannel}")
   # Print out the center frequency
-  echo "$centerFrequency"
+  if [[ "$verbose" == "true" ]]; then
+    err "Frequency == $centerFrequency"
+  else 
+    echo "$centerFrequency"
+  fi
 elif [[ -n "$startFrequency" ]]; then
   clientChannel=$(getChannelFromFrequency "${startFrequency}")
   # Print out the client channel
-  echo "$clientChannel"
-fi  
+  if [[ "$verbose" == "true" ]]; then
+    err "Channel == $clientChannel"
+  else
+    echo "$clientChannel"
+  fi
+fi
 
+if [[ "$verbose" == "true" ]]; then
+   case "${band}" in
+    24) fullBand="2.4GHz" ;;
+    50) fullBand="5GHz" ;;
+    60) fullBand="6GHz" ;;
+    *) err "Invalid Frequency" ;;
+  esac
+  err "Band == $fullBand"
+fi
