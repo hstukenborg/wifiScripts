@@ -111,17 +111,33 @@ function disableMonitor() {
   
 }
 
+function showHelp() {
+  echo "*******************************************************************************"
+  echo "setmonitor controls establishing and removing monitor mode wireless interfaces."
+  echo "*******************************************************************************"
+  echo "Available options:"
+  echo "-i <int>: Specify a specific interface to use. e.g. -i wlan1"
+  echo "-n: Ignore the internal interface. This allows maintaining a network connection during"
+  echo "capture."
+  echo "-d: Disable monitor mode. Disables and deletes all monitor interfaces."
+  echo "-v: Use verbose output."
+  echo "-h: Show this help."
+  echo ""
+
+}
+
 # Argument processing
 verbose='false'
 noInternal='false'
 useInterface=''
 disableMonitor='false'
-while getopts "i:dnv" flag; do
+while getopts "i:dnvh" flag; do
   case "${flag}" in
     i) useInterface="${OPTARG}" ;;
     n) noInternal='true' ;;
     d) disableMonitor='true' ;;
     v) verbose='true' ;;
+    h) showHelp; exit 0 ;;
     *) err "Invalid option: ${flag}" ;;
   esac
 done
