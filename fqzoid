@@ -4,6 +4,7 @@
 # channel and width on a specified band.
 #
 
+##############################################################################################################
 #
 # Forumlas
 #
@@ -33,6 +34,21 @@ function err() {
   echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
 }
 
+function showHelp() {
+  echo "*******************************************************************************"
+  echo " fqzoid lets you compute either the center freq for a given channel or derive"
+  echo " the frequency from a provided channel."
+  echo "*******************************************************************************"
+  echo "Available options:"
+  echo "-f <frequency>: Frequency to use to get the control channel."
+  echo "-c <channel>: Channel to use to derive the frequency."
+  echo "-b <band>: Specify which band to use. Options are 24,5,6."
+  echo "-v: Use verbose output"
+  echo "-h: Show this help."
+  echo ""
+
+}
+
 # Calculate 2.4 GHz
 # Basic Formula: Frequency (MHz) = (Channel Number × 5) + 2407 (with adjustments for specific channels).
 # [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5.
@@ -42,8 +58,8 @@ function calcCenterFreq() {
 
   case "${band}" in
     24) cFrequency=$((lChannel - 1 * 5 + 2412)) ;;
-    50) cFrequency=$((lChannel * 5 + 5000)) ;;
-    60) cFrequency=$((lChannel * 5 + 5950)) ;;
+    5) cFrequency=$((lChannel * 5 + 5000)) ;;
+    6) cFrequency=$((lChannel * 5 + 5950)) ;;
     *) err "Invalid Channel" ;;
   esac
 
@@ -74,7 +90,7 @@ verbose='false'
 startChannel=''
 startFrequency=''
 band='24'
-while getopts "f:c:b:v" opt; do
+while getopts "f:c:b:v:h" opt; do
   case $opt in
     c)
     startChannel="$OPTARG" 
@@ -88,10 +104,15 @@ while getopts "f:c:b:v" opt; do
     #echo "Specified band: $band"
     ;;
     v)
-    verbose='true' 
+    verbose='true'
+    ;;
+    h)
+    getHelp()
+    exit 0
     ;;
     *)
     err "Invalid option: ${opt}" 
+    exit 1
     ;;
   esac
 done
@@ -121,8 +142,8 @@ fi
 if [[ "$verbose" == "true" ]]; then
    case "${band}" in
     24) fullBand="2.4GHz" ;;
-    50) fullBand="5GHz" ;;
-    60) fullBand="6GHz" ;;
+    5) fullBand="5GHz" ;;
+    6) fullBand="6GHz" ;;
     *) err "Invalid Frequency" ;;
   esac
   err "Band == $fullBand"
