@@ -90,30 +90,14 @@ verbose='false'
 startChannel=''
 startFrequency=''
 band='24'
-while getopts "f:c:b:v:h" opt; do
-  case $opt in
-    c)
-    startChannel="$OPTARG" 
-    #echo "Specified channel: $startChannel"
-    ;;
-    f)
-    startFrequency="$OPTARG"
-    ;;
-    b)
-    band="$OPTARG" 
-    #echo "Specified band: $band"
-    ;;
-    v)
-    verbose='true'
-    ;;
-    h)
-    getHelp()
-    exit 0
-    ;;
-    *)
-    err "Invalid option: ${opt}" 
-    exit 1
-    ;;
+while getopts "f:c:b:vh" opt; do
+  case "${opt}" in
+    c) startChannel="$OPTARG" ;;
+    f) startFrequency="$OPTARG" ;;
+    b) band="$OPTARG" ;;
+    v) verbose='true' ;;
+    h) showHelp ;;
+    *) err "Invalid option: ${opt}" ;;
   esac
 done
 
