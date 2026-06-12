@@ -26,6 +26,8 @@ while getopts "ip:v" flag; do
   esac
 done
 
+
+
 # Issue command based on the requested channel
 case "$1" in
 

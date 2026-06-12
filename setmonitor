@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-# This script is designed to setup the available interfaces in monitor mode.
+# This script is designed to setup the current Linux system to capture 802.11 monitor mode
+# traffic from any or all available supported interfaces.
 
 # Functions
 
@@ -15,12 +16,40 @@ function err() {
   echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
 }
 
+##############################################################################################################
+# Calculate 2.4/5/6 GHz center frequency.
+# Basic Formulas:
+# - 2.4 GHz == Frequency (MHz) = (Channel Number * 5) + 2407 (else 2484 for ch 14).
+# [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5
+# - 5 GHz == 5000 + channel * 5
+# - 6 GHz == 5950 + channel * 5
+##############################################################################################################
+function calcCenterFreq() {
+  local -i lChannel=$1
+  local -i cFrequency
+
+  case "${band}" in
+    24) if [ $lChannel -eq 14 ]; then 
+          cFrequency=2484
+        elif [ $lChannel -gt 14 ]; then
+          err "Invalid channel: $lChannel"
+        else
+          cFrequency=$((2407 + lChannel * 5))
+        fi 
+        ;;
+    5) cFrequency=$((5000 + lChannel * 5)) ;;
+    6) cFrequency=$((5950 + lChannel * 5)) ;;
+    *) err "Invalid Channel: $lChannel" ;;
+  esac
+
+  echo "$cFrequency"
+}
+
 ######
 #
 # enableMonitor()
 #
-# Create monitor interfaces for the specified physical 
-# interfaces.
+# Create monitor interfaces for the specified physical interfaces.
 #
 ######
 function enableMonitor() {
@@ -36,8 +65,8 @@ function enableMonitor() {
     aInterfaces[0]="$singleInterface"
     mapfile -t aPhysical < <(iw dev | grep -B1 "$singleInterface" | sed /"$singleInterface"/d)
   else
-    mapfile -t aInterfaces < <(ip link show | grep wlan | awk '{print $2}' | grep -E -o '([0-9]+)')
-    mapfile -t aPhysical < <(iw dev | grep phy | awk -F '\#' '{print $2}' | sort)
+    mapfile -t aInterfaces < <(ip link show | awk '/wlan/ {print $2}' | grep -E -o '([0-9]+)')
+    mapfile -t aPhysical < <(iw dev | awk -F '\#' '/phy/ {print $2}' | sort)
   fi
 
   # Check if we need to ignore the internal adapter and remove it from the arrays.
@@ -95,10 +124,21 @@ function enableMonitor() {
   done
 }
 
+#####
+#
+# disableMonitor()
+# 
+# Remove the monitor mode interface and reset the main interface back to managed.
+#
+#####
 function disableMonitor() {
   
+  if [[ "$verbose" == "true" ]]; then
+    err "Attempting to disable monitor interfaces."
+  fi
+
   # Build an array of monitor interfaces.
-  mapfile -t aInterfaces < <(ip link show | grep mon | awk '{print $2}' | grep -E -o '([0-9]+)')
+  mapfile -t aInterfaces the channel for a given monitor-mode interfaceces < <(ip link show | grep mon | awk '{print $2}' | grep -E -o '([0-9]+)')
 
   # Bring down any online monitor interfaces and delete them.
   for interface in "${aInterfaces[@]}"; do
@@ -110,15 +150,53 @@ function disableMonitor() {
   done
   
 }
+  
+#####
+#
+# setChannel()
+# 
+# Set the channel or frequency for the supplied monitor-mode interface
+#
+#####
+function setChannel() {
+  
+  # 6 GHz PSC list:
+  declare -a a6PSC
+  a6PSC=(5 21 37 53 69 85 101 117 133 149 165 181 197 213 229)
+  echo "${a6PSC[@]}"
+
+}
+
+function listInterfaces() {
+  # In case of any external interfaces, get the list of available interfaces
+  # and phy numbers, then use the last one as the base number for phy/wlan/mon. 
+  # This is a bash-specific syntax that removes unwanted new lines as elements. 
+  # The '-t' option for mapfile removes trailing newlines from each line read. 
+  declare -a aInterfaces aPhysical
+
+  mapfile -t aInterfaces < <(ip link show | awk '/wlan/ {print $2}' | tr -d ':')
+  mapfile -t aPhysical < <(iw dev | awk -F '\#' '/phy/ {print $2}' | sort)
+   
+  for interface in "${aInterfaces[@]}"; do
+    echo "interface: $interface"
+  done
+
+  for phy in "${aPhysical[@]}"; do
+    echo "physical: $phy"
+  done
+  
+}
+
 
 function showHelp() {
   echo "*******************************************************************************"
-  echo "setmonitor controls establishing and removing monitor mode wireless interfaces."
+  echo "$(basename $0) controls the monitor mode state on wireless interfaces.         "
   echo "*******************************************************************************"
   echo "Available options:"
   echo "-i <int>: Specify a specific interface to use. e.g. -i wlan1"
-  echo "-n: Ignore the internal interface. This allows maintaining a network connection during"
-  echo "capture."
+  echo "-l: list available interfaces"
+  echo "-n: Ignore the internal interface. This allows maintaining a network connection"
+  echo "    during capture."
   echo "-d: Disable monitor mode. Disables and deletes all monitor interfaces."
   echo "-v: Use verbose output."
   echo "-h: Show this help."
@@ -126,14 +204,20 @@ function showHelp() {
 
 }
 
+###############################################################################
+################################# MAIN ########################################
+###############################################################################
+
 # Argument processing
 verbose='false'
 noInternal='false'
+listInts='false'
 useInterface=''
 disableMonitor='false'
-while getopts "i:dnvh" flag; do
+while getopts "i:ldnvh" flag; do
   case "${flag}" in
     i) useInterface="${OPTARG}" ;;
+    l) listInts='true' ;;
     n) noInternal='true' ;;
     d) disableMonitor='true' ;;
     v) verbose='true' ;;
@@ -141,6 +225,11 @@ while getopts "i:dnvh" flag; do
     *) err "Invalid option: ${flag}" ;;
   esac
 done
+
+# If they just want to list the available interfaces and exit.
+if [[ "$listInts" == "true" ]]; then
+  listInterfaces && exit
+fi
 
 # If we specified an interface to use, map that out.
 if [[ -n "$useInterface" ]]; then
