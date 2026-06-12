@@ -5,13 +5,13 @@
 
 # Functions
 
-######
+##############################################################################################################
 #
 # err()
 #
 # Output supplied text to stderr.
 #
-######
+##############################################################################################################
 function err() {
   echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
 }
@@ -45,13 +45,13 @@ function calcCenterFreq() {
   echo "$cFrequency"
 }
 
-######
+##############################################################################################################
 #
 # enableMonitor()
 #
 # Create monitor interfaces for the specified physical interfaces.
 #
-######
+##############################################################################################################
 function enableMonitor() {
 
   # In case of any external interfaces, get the list of available interfaces
@@ -124,13 +124,13 @@ function enableMonitor() {
   done
 }
 
-#####
+##############################################################################################################
 #
 # disableMonitor()
 # 
 # Remove the monitor mode interface and reset the main interface back to managed.
 #
-#####
+##############################################################################################################
 function disableMonitor() {
   
   if [[ "$verbose" == "true" ]]; then
@@ -151,13 +151,13 @@ function disableMonitor() {
   
 }
   
-#####
+##############################################################################################################
 #
 # setChannel()
 # 
 # Set the channel or frequency for the supplied monitor-mode interface
 #
-#####
+##############################################################################################################
 function setChannel() {
   
   # 6 GHz PSC list:
@@ -167,27 +167,24 @@ function setChannel() {
 
 }
 
+##############################################################################################################
+# 
+# listInterfaces()
+#
+##############################################################################################################
 function listInterfaces() {
-  # In case of any external interfaces, get the list of available interfaces
-  # and phy numbers, then use the last one as the base number for phy/wlan/mon. 
-  # This is a bash-specific syntax that removes unwanted new lines as elements. 
-  # The '-t' option for mapfile removes trailing newlines from each line read. 
-  declare -a aInterfaces aPhysical
-
-  mapfile -t aInterfaces < <(ip link show | awk '/wlan/ {print $2}' | tr -d ':')
-  mapfile -t aPhysical < <(iw dev | awk -F '\#' '/phy/ {print $2}' | sort)
-   
-  for interface in "${aInterfaces[@]}"; do
-    echo "interface: $interface"
-  done
-
-  for phy in "${aPhysical[@]}"; do
-    echo "physical: $phy"
-  done
   
+  # List all of the current physical interfaces along with the matching WLAN
+  iw dev | awk '/phy/{ PHY=$0; next } /Interface/{ print PHY "=" $2 }'
+
 }
 
 
+##############################################################################################################
+# 
+# showHelp()
+#
+##############################################################################################################
 function showHelp() {
   echo "*******************************************************************************"
   echo "$(basename $0) controls the monitor mode state on wireless interfaces.         "
