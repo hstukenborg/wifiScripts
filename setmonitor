@@ -26,16 +26,17 @@ function err() {
 ##############################################################################################################
 function calcCenterFreq() {
   local -i lChannel=$1
+  local -i lBand=$2
   local -i cFrequency
 
-  case "${band}" in
-    24) if [ $lChannel -eq 14 ]; then 
+  case "${lBand}" in
+    24) if [ $lChann  echo "$lBand"el -eq 14 ]; then
           cFrequency=2484
         elif [ $lChannel -gt 14 ]; then
           err "Invalid channel: $lChannel"
         else
           cFrequency=$((2407 + lChannel * 5))
-        fi 
+        fi
         ;;
     5) cFrequency=$((5000 + lChannel * 5)) ;;
     6) cFrequency=$((5950 + lChannel * 5)) ;;
@@ -47,6 +48,34 @@ function calcCenterFreq() {
 
 ##############################################################################################################
 #
+# getChannelFromFrequency()
+#
+# This function returns the channel number for a given frequency, band, and width.
+#
+##############################################################################################################
+function getChannelFromFrequency() {
+  local -i lFrequency=$1
+  local -i cChannel
+  local -i lBand=$2
+
+  case "${lBand}" in
+    24) if [ $lFrequency -eq 2484 ]; then
+          cChannel=14
+        else
+          cChannel=$(((lFrequency-2407) / 5))
+        fi
+        ;;
+    5) cChannel=$(((lFrequency-5000) / 5)) ;;
+    6) cChannel=$(((lFrequency-5950) / 5)) ;;
+    *) err "Invalid Frequency" ;;
+  esac
+
+  echo "$cChannel"
+}
+
+
+##############################################################################################################
+#
 # enableMonitor()
 #
 # Create monitor interfaces for the specified physical interfaces.
@@ -55,9 +84,9 @@ function calcCenterFreq() {
 function enableMonitor() {
 
   # In case of any external interfaces, get the list of available interfaces
-  # and phy numbers, then use the last one as the base number for phy/wlan/mon. 
-  # This is a bash-specific syntax that removes unwanted new lines as elements. 
-  # The '-t' option for mapfile removes trailing newlines from each line read. 
+  # and phy numbers, then use the last one as the base number for phy/wlan/mon.
+  # This is a bash-specific syntax that removes unwanted new lines as elements.
+  # The '-t' option for mapfile removes trailing newlines from each line read.
   declare -a aInterfaces aPhysical
 
   # If a single interface is specificed, set up the arrays appropriately
@@ -110,9 +139,9 @@ function enableMonitor() {
     # Bring up the monX interface.
     sudo ip link set "$currentMon" up
 
-    # Initiate a scan via wlanX, but hide the results. 
-    # NOTE: This is specifically for Intel interfaces that rely upon 
-    # Location Aware Regulatory to enable channels for a given frequency 
+    # Initiate a scan via wlanX, but hide the results.
+    # NOTE: This is specifically for Intel interfaces that rely upon
+    # Location Aware Regulatory to enable channels for a given frequency
     # (specifically 6 GHz).
     sudo iw "$currentInt" scan > /dev/null
 
@@ -127,39 +156,44 @@ function enableMonitor() {
 ##############################################################################################################
 #
 # disableMonitor()
-# 
+#
 # Remove the monitor mode interface and reset the main interface back to managed.
 #
 ##############################################################################################################
 function disableMonitor() {
-  
+
   if [[ "$verbose" == "true" ]]; then
     err "Attempting to disable monitor interfaces."
   fi
 
   # Build an array of monitor interfaces.
-  mapfile -t aInterfaces the channel for a given monitor-mode interfaceces < <(ip link show | grep mon | awk '{print $2}' | grep -E -o '([0-9]+)')
+  mapfile -t aInterfaces the channel for a given monitor-mode interfaceces < <(ip link show | awk '/mon/ {print $2}' | grep -E -o '([0-9]+)')
 
   # Bring down any online monitor interfaces and delete them.
   for interface in "${aInterfaces[@]}"; do
     sudo ip link show mon"$interface" | grep -w UP>/dev/null && sudo ip link set mon"$interface" down
     sudo iw dev mon"$interface" del
+
+    # Restore the linked interface to managed.
+    sudo iw wlan"$interface" set type managed
+    sudo ip link set wlan"$interface" up
+
     if [[ "$verbose" == "true" ]]; then
       err "Removed monitor interface mon$interface"
     fi
   done
-  
+
 }
-  
+
 ##############################################################################################################
 #
 # setChannel()
-# 
+#
 # Set the channel or frequency for the supplied monitor-mode interface
 #
 ##############################################################################################################
 function setChannel() {
-  
+
   # 6 GHz PSC list:
   declare -a a6PSC
   a6PSC=(5 21 37 53 69 85 101 117 133 149 165 181 197 213 229)
@@ -168,12 +202,12 @@ function setChannel() {
 }
 
 ##############################################################################################################
-# 
+#
 # listInterfaces()
 #
 ##############################################################################################################
 function listInterfaces() {
-  
+
   # List all of the current physical interfaces along with the matching WLAN
   iw dev | awk '/phy/{ PHY=$0; next } /Interface/{ print PHY "=" $2 }'
 
@@ -181,15 +215,18 @@ function listInterfaces() {
 
 
 ##############################################################################################################
-# 
+#
 # showHelp()
 #
 ##############################################################################################################
 function showHelp() {
   echo "*******************************************************************************"
-  echo "$(basename $0) controls the monitor mode state on wireless interfaces.         "
+  echo "$(basename "$0") controls the monitor mode state on wireless interfaces.       "
   echo "*******************************************************************************"
   echo "Available options:"
+  echo "-f <frequency>: Frequency to use to get the control channel."
+  echo "-c <channel>: Channel to use to derive the frequency."
+  echo "-b <band>: Specify which band to use. Options are 24,5,6."
   echo "-i <int>: Specify a specific interface to use. e.g. -i wlan1"
   echo "-l: list available interfaces"
   echo "-n: Ignore the internal interface. This allows maintaining a network connection"
@@ -210,9 +247,18 @@ verbose='false'
 noInternal='false'
 listInts='false'
 useInterface=''
+band=''
+startChannel=''
+startFrequency=''
 disableMonitor='false'
-while getopts "i:ldnvh" flag; do
+clientChannel=''
+centerFrequency=''
+
+while getopts "c:f:b:i:ldnvh" flag; do
   case "${flag}" in
+    c) startChannel="${OPTARG}" ;;
+    f) startFrequency="${OPTARG}" ;;
+    b) band="${OPTARG}" ;;
     i) useInterface="${OPTARG}" ;;
     l) listInts='true' ;;
     n) noInternal='true' ;;
@@ -222,6 +268,27 @@ while getopts "i:ldnvh" flag; do
     *) err "Invalid option: ${flag}" ;;
   esac
 done
+
+# If we're just doing channel/frequency conversion.
+if [[ -n "$startChannel" ]]; then
+  centerFrequency=$(calcCenterFreq "${startChannel}" "${band}")
+  # Print out the center frequency
+  if [[ "$verbose" == "true" ]]; then
+    err "Frequency == $centerFrequency"
+  else
+    echo "$centerFrequency"
+  fi
+  exit
+elif [[ -n "$startFrequency" ]]; then
+  clientChannel=$(getChannelFromFrequency "${startFrequency}" "${band}")
+  # Print out the client channel
+  if [[ "$verbose" == "true" ]]; then
+    err "Channel == $clientChannel"
+  else
+    echo "$clientChannel"
+  fi
+  exit
+fi
 
 # If they just want to list the available interfaces and exit.
 if [[ "$listInts" == "true" ]]; then
@@ -236,12 +303,12 @@ fi
 if [[ "$disableMonitor" == "false" ]]; then
   enableMonitor
   if [[ "$verbose" == "true" ]]; then
-    echo "Created the following monitor interfaces: " 
+    echo "Created the following monitor interfaces: "
     ip link show | grep -Eo '(mon[0-9]+)'
   fi
 elif [[ "$disableMonitor" == "true" ]]; then
   disableMonitor
-else 
+else
   err "Nothing to do - exiting."
   exit 1
 fi
