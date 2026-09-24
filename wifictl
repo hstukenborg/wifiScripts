@@ -434,24 +434,71 @@ function channelMain() {
 
 ##############################################################################################################
 #
+# scanUsage()
+#
+##############################################################################################################
+function scanUsage() {
+  echo "Usage: $(basename "$0") scan [-i <interface>] [-b <band>] [-s <ssid>] [-v]"
+  echo "  -i <interface>: Interface to scan on. Default: wlan0."
+  echo "  -b <band>: Restrict results to a band. Options are 24,5,6."
+  echo "  -s <ssid>: Restrict results to SSIDs containing this string."
+  echo "  -v: Use verbose output."
+}
+
+##############################################################################################################
+#
 # scanRun()
 #
-# Trigger a scan via wpa_cli and print the results.
+# Trigger a scan via wpa_cli and print the results, optionally restricted to
+# a band (by frequency range) and/or an SSID (substring match).
 #
 ##############################################################################################################
 function scanRun() {
   local OPTIND=1
-  local iface='wlan0' flag
+  local iface='wlan0' band='' ssid='' verbose='false' flag
 
-  while getopts "i:" flag; do
+  while getopts "i:b:s:v" flag; do
     case "${flag}" in
       i) iface="${OPTARG}" ;;
+      b) band="${OPTARG}" ;;
+      s) ssid="${OPTARG}" ;;
+      v) verbose='true' ;;
       *) err "Invalid option: ${flag}"; return 1 ;;
     esac
   done
 
-  sudo wpa_cli -i "$iface" scan 2>/dev/null
-  sudo wpa_cli -i "$iface" scan_results 2>/dev/null
+  local freqMin='' freqMax=''
+  if [[ -n "$band" ]]; then
+    case "$band" in
+      24) freqMin=2400; freqMax=2495 ;;
+      5) freqMin=5000; freqMax=5895 ;;
+      6) freqMin=5925; freqMax=7125 ;;
+      *) err "Invalid band: $band"; return 1 ;;
+    esac
+  fi
+
+  if [[ "$verbose" == "true" ]]; then
+    err "Scanning on $iface${band:+, band $band}${ssid:+, SSID contains '$ssid'}"
+  fi
+
+  sudo wpa_cli -i "$iface" scan >/dev/null 2>&1
+
+  local results
+  results=$(sudo wpa_cli -i "$iface" scan_results 2>/dev/null)
+
+  if [[ -z "$results" ]]; then
+    err "No scan results returned for $iface."
+    return 1
+  fi
+
+  # scan_results is a header line followed by tab-separated
+  # bssid/frequency/signal level/flags/ssid rows.
+  head -n1 <<< "$results"
+  tail -n +2 <<< "$results" | awk -F'\t' -v fmin="$freqMin" -v fmax="$freqMax" -v ssid="$ssid" '
+    fmin != "" && ($2 < fmin || $2 > fmax) { next }
+    ssid != "" && index($5, ssid) == 0 { next }
+    { print }
+  '
 }
 
 ##############################################################################################################
@@ -473,7 +520,8 @@ function showHelp() {
   echo "  freq channel    -f <frequency> -b <band> [-v] Frequency -> channel."
   echo "  channel set     -p <phy> -c <channel> [-b <band>] [-w <width>] [-F <freq>] [-v]"
   echo "                                                 Set the operating frequency on a phy."
-  echo "  scan            [-i <interface>]              Trigger a wpa_cli scan and print results."
+  echo "  scan            [-i <interface>] [-b <band>] [-s <ssid>]"
+  echo "                                                 Trigger a wpa_cli scan, filter by band and/or SSID."
   echo ""
   echo "Run without arguments, or with -h/--help, to show this message."
   echo ""
