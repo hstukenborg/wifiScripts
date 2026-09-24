@@ -21,8 +21,14 @@ Personal scripts used to manage capturing WiFi data on Linux
 
   `monitor enable -C <specs>` sets a channel per interface as it's brought into monitor
   mode, from a comma-separated `<interface>=<channel>:<band>[:<width>[:<centerfreq>]]` list
-  (e.g. `-C "wlan0=6:24,wlan1=36:5:80:5210"`). Add `-I` to interactively prompt for the
+  (e.g. `-C "wlan0=6:24,wlan1=36:5:80"`). Add `-I` to interactively prompt for the
   channel/band/width of any interface with no matching `-C` entry (requires a terminal).
+
+  For widths above 20 MHz, both `channel set -F` and `monitor enable -C`'s center frequency
+  are auto-calculated from standard 5/6 GHz bonded-channel segment tables when omitted
+  (verified against the values Wi-Fi vendors/regulators publish for these segments) --
+  pass one explicitly only to override, or when the channel/width isn't a recognized
+  standard segment (2.4 GHz, or a 5 GHz combination that crosses the 144/149 DFS gap).
 
 - iwoutput.txt : sample real-world `iw phy` output (multiple phys, 2.4/5/6 GHz), used as a
   fixture to validate wifictl's band-detection parsing against actual Linux formatting.

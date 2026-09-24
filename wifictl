@@ -164,6 +164,118 @@ function bandLabel() {
 
 ##############################################################################################################
 #
+# calc5GHzSegmentCenterChannel()
+#
+# Print the center channel of the fixed 40/80/160 MHz segment a 5 GHz primary
+# channel belongs to. 5 GHz segments aren't uniformly spaced (the 144/149
+# DFS gap breaks the pattern), so this is a table of the standard,
+# non-DFS-crossing segments rather than a formula. Fails for any channel/width
+# not in the table (e.g. channel 165, which has no 40/80/160 MHz partner in
+# the common US channel set).
+#
+##############################################################################################################
+function calc5GHzSegmentCenterChannel() {
+  local lChannel=$1 lWidth=$2
+
+  case "$lWidth" in
+    40)
+      case "$lChannel" in
+        36|40) echo 38 ;;
+        44|48) echo 46 ;;
+        52|56) echo 54 ;;
+        60|64) echo 62 ;;
+        100|104) echo 102 ;;
+        108|112) echo 110 ;;
+        116|120) echo 118 ;;
+        124|128) echo 126 ;;
+        132|136) echo 134 ;;
+        140|144) echo 142 ;;
+        149|153) echo 151 ;;
+        157|161) echo 159 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    80)
+      case "$lChannel" in
+        36|40|44|48) echo 42 ;;
+        52|56|60|64) echo 58 ;;
+        100|104|108|112) echo 106 ;;
+        116|120|124|128) echo 122 ;;
+        132|136|140|144) echo 138 ;;
+        149|153|157|161) echo 155 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    160)
+      case "$lChannel" in
+        36|40|44|48|52|56|60|64) echo 50 ;;
+        100|104|108|112|116|120|124|128) echo 114 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+##############################################################################################################
+#
+# calc6GHzSegmentCenterChannel()
+#
+# Print the center channel of the 40/80/160 MHz segment a 6 GHz primary
+# channel belongs to. Unlike 5 GHz, 6 GHz channels (1,5,9,...,233) are
+# uniformly spaced with no gaps, so this is a plain formula: segments are
+# fixed-size, non-overlapping groups aligned from channel 1.
+#
+##############################################################################################################
+function calc6GHzSegmentCenterChannel() {
+  local -i lChannel=$1
+  local lWidth=$2
+  local -i groupSize idx0 groupIdx groupStartIdx0 groupStartChannel
+
+  case "$lWidth" in
+    40) groupSize=2 ;;
+    80) groupSize=4 ;;
+    160) groupSize=8 ;;
+    *) return 1 ;;
+  esac
+
+  if (( lChannel < 1 || lChannel > 233 || (lChannel - 1) % 4 != 0 )); then
+    return 1
+  fi
+
+  idx0=$(( (lChannel - 1) / 4 ))
+  groupIdx=$(( idx0 / groupSize ))
+  groupStartIdx0=$(( groupIdx * groupSize ))
+  groupStartChannel=$(( 1 + groupStartIdx0 * 4 ))
+
+  echo "$(( groupStartChannel + (groupSize - 1) * 2 ))"
+}
+
+##############################################################################################################
+#
+# calcSegmentCenterFreq()
+#
+# Print the center frequency (MHz) of the bonded-channel segment a primary
+# channel belongs to, for a given band and width > 20. Fails if the band
+# doesn't have a defined segment table/formula (2.4 GHz) or the channel/width
+# combination isn't a recognized standard segment.
+#
+##############################################################################################################
+function calcSegmentCenterFreq() {
+  local lChannel=$1 lBand=$2 lWidth=$3
+  local centerChannel
+
+  case "$lBand" in
+    5) centerChannel=$(calc5GHzSegmentCenterChannel "$lChannel" "$lWidth") || return 1 ;;
+    6) centerChannel=$(calc6GHzSegmentCenterChannel "$lChannel" "$lWidth") || return 1 ;;
+    *) return 1 ;;
+  esac
+
+  calcCenterFreq "$centerChannel" "$lBand"
+}
+
+##############################################################################################################
+#
 # phyForInterface()
 #
 # Print the phy (e.g. "phy0") that owns the given interface, via
@@ -308,14 +420,15 @@ function parseChannelSpec() {
 # promptChannelSpec()
 #
 # Interactively ask whether to set a channel for an interface's monitor
-# interface, and if so, for the channel/band/width (and center frequency, if
-# width > 20). Prints nothing (so the caller skips it) if declined, not on a
+# interface, and if so, for the channel/band/width. The center frequency for
+# widths > 20 is left to applyChannelToPhy's automatic calculation, not asked
+# here. Prints nothing (so the caller skips it) if declined, not on a
 # terminal, or given incomplete input.
 #
 ##############################################################################################################
 function promptChannelSpec() {
   local lIf=$1
-  local answer channel band width centerFreq1
+  local answer channel band width
 
   if [[ ! -t 0 ]]; then
     return 1
@@ -336,11 +449,7 @@ function promptChannelSpec() {
     return 1
   fi
 
-  if [[ "$width" -gt 20 ]]; then
-    read -r -p "  Center frequency of the whole bonded channel: " centerFreq1
-  fi
-
-  echo "$channel $band $width $centerFreq1"
+  echo "$channel $band $width"
 }
 
 ##############################################################################################################
@@ -575,10 +684,13 @@ function monitorUsage() {
   echo "    -v: Print the interface/phy mapping and each step as it runs."
   echo "    -C <specs>: Set a channel per interface as it's enabled. Comma-separated"
   echo "                list of <interface>=<channel>:<band>[:<width>[:<centerfreq>]],"
-  echo "                e.g. -C \"wlan0=6:24,wlan1=36:5:80:5210\". An interface with no"
-  echo "                matching entry is left unset unless -I is also given."
+  echo "                e.g. -C \"wlan0=6:24,wlan1=36:5:80\". The center frequency for"
+  echo "                widths above 20 is auto-calculated if omitted; only pass it to"
+  echo "                override, or if the channel/width isn't a standard segment. An"
+  echo "                interface with no matching entry is left unset unless -I is given."
   echo "    -I: For any interface with no -C entry, interactively prompt for its"
-  echo "        channel/band/width. Requires a terminal; ignored otherwise."
+  echo "        channel/band/width (center frequency, if needed, is auto-calculated)."
+  echo "        Requires a terminal; ignored otherwise."
   echo ""
   echo "  disable [-v]"
   echo "    Remove monitor-mode interfaces and restore their parent interfaces to managed mode."
@@ -709,8 +821,14 @@ function applyChannelToPhy() {
   local controlFreq
 
   if [[ "$lWidth" -gt 20 && -z "$lCenterFreq1" ]]; then
-    err "$lPhy: a center frequency is required for channel widths greater than 20 MHz."
-    return 1
+    lCenterFreq1=$(calcSegmentCenterFreq "$lChannel" "$lBand" "$lWidth")
+    if [[ -z "$lCenterFreq1" ]]; then
+      err "$lPhy: could not automatically determine a center frequency for channel" \
+          "$lChannel, band $lBand, width ${lWidth}MHz -- pass one explicitly."
+      return 1
+    elif [[ "$lVerbose" == "true" ]]; then
+      err "Auto-calculated center frequency: $lCenterFreq1 MHz"
+    fi
   fi
 
   checkBandSupported "$lPhy" "$lBand" || return 1
@@ -737,8 +855,10 @@ function channelUsage() {
   echo "    -c <channel>: Channel number to derive the control frequency from. Required."
   echo "    -b <band>: Band the channel belongs to. Options are 24,5,6. Default: 5."
   echo "    -w <width>: Channel width in MHz, e.g. 20,40,80,160. Default: 20."
-  echo "    -F <center freq>: Center frequency of the whole bonded channel. Required if"
-  echo "       -w is greater than 20, since it can't be derived from the channel alone."
+  echo "    -F <center freq>: Center frequency of the whole bonded channel. For widths"
+  echo "       above 20, this is auto-calculated from standard 5/6 GHz segment tables"
+  echo "       if omitted; only pass it to override, or if the channel/width isn't a"
+  echo "       recognized standard segment (e.g. 2.4 GHz, or a 5 GHz DFS-gap crossing)."
   echo "    -v: Print the frequency/width being set before issuing the command."
 }
 
