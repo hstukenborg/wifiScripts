@@ -281,6 +281,70 @@ function checkBandSupported() {
 
 ##############################################################################################################
 #
+# parseChannelSpec()
+#
+# Parse a "<channel>:<band>[:<width>[:<centerfreq>]]" spec into
+# "channel band width centerfreq" (width defaults to 20). Fails on a
+# malformed spec.
+#
+##############################################################################################################
+function parseChannelSpec() {
+  local lSpec=$1
+  local lChannel lBand lWidth lCenterFreq1
+
+  IFS=':' read -r lChannel lBand lWidth lCenterFreq1 <<< "$lSpec"
+  lWidth="${lWidth:-20}"
+
+  if [[ -z "$lChannel" || -z "$lBand" ]]; then
+    err "Invalid channel spec: '$lSpec' (expected <channel>:<band>[:<width>[:<centerfreq>]])"
+    return 1
+  fi
+
+  echo "$lChannel $lBand $lWidth $lCenterFreq1"
+}
+
+##############################################################################################################
+#
+# promptChannelSpec()
+#
+# Interactively ask whether to set a channel for an interface's monitor
+# interface, and if so, for the channel/band/width (and center frequency, if
+# width > 20). Prints nothing (so the caller skips it) if declined, not on a
+# terminal, or given incomplete input.
+#
+##############################################################################################################
+function promptChannelSpec() {
+  local lIf=$1
+  local answer channel band width centerFreq1
+
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+
+  read -r -p "Set a channel for $lIf's monitor interface now? [y/N] " answer
+  if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    return 1
+  fi
+
+  read -r -p "  Channel: " channel
+  read -r -p "  Band (24, 5, or 6): " band
+  read -r -p "  Width in MHz [20]: " width
+  width="${width:-20}"
+
+  if [[ -z "$channel" || -z "$band" ]]; then
+    err "Channel and band are required; skipping $lIf."
+    return 1
+  fi
+
+  if [[ "$width" -gt 20 ]]; then
+    read -r -p "  Center frequency of the whole bonded channel: " centerFreq1
+  fi
+
+  echo "$channel $band $width $centerFreq1"
+}
+
+##############################################################################################################
+#
 # monitorEnable()
 #
 # Create monitor interfaces for the specified physical interfaces.
@@ -288,16 +352,35 @@ function checkBandSupported() {
 ##############################################################################################################
 function monitorEnable() {
   local OPTIND=1
-  local singleInterface='' noInternal='false' verbose='false' flag
+  local singleInterface='' noInternal='false' verbose='false' channelSpecList='' interactive='false' flag
 
-  while getopts "i:nv" flag; do
+  while getopts "i:nvC:I" flag; do
     case "${flag}" in
       i) singleInterface="${OPTARG}" ;;
       n) noInternal='true' ;;
       v) verbose='true' ;;
+      C) channelSpecList="${OPTARG}" ;;
+      I) interactive='true' ;;
       *) err "Invalid option: ${flag}"; return 1 ;;
     esac
   done
+
+  # Parse -C's comma-separated <interface>=<channel>:<band>[:<width>[:<centerfreq>]]
+  # entries into a lookup by interface name.
+  declare -A aChannelSpecs
+  if [[ -n "$channelSpecList" ]]; then
+    local specEntry specIf specVal
+    IFS=',' read -ra specEntries <<< "$channelSpecList"
+    for specEntry in "${specEntries[@]}"; do
+      specIf="${specEntry%%=*}"
+      specVal="${specEntry#*=}"
+      if [[ -z "$specIf" || -z "$specVal" || "$specIf" == "$specEntry" ]]; then
+        err "Invalid -C entry: '$specEntry' (expected <interface>=<channel>:<band>[:<width>[:<centerfreq>]])"
+        return 1
+      fi
+      aChannelSpecs[$specIf]="$specVal"
+    done
+  fi
 
   # Map every wlan-type interface to the phy it actually belongs to (see
   # listPhyInterfaceMap for why this replaces sorted/extracted numeric-suffix
@@ -365,6 +448,21 @@ function monitorEnable() {
 
     # Set the region to US (by default):
     sudo iw reg set US
+
+    # Apply a per-interface channel, either from -C's list or (absent a list
+    # entry) an interactive prompt. A failure here (bad spec, unsupported
+    # band, decline) just skips this interface's channel -- it doesn't abort
+    # the rest of the batch.
+    local specChannel='' specBand='' specWidth='' specCenterFreq1=''
+    if [[ -n "${aChannelSpecs[$currentInt]:-}" ]]; then
+      read -r specChannel specBand specWidth specCenterFreq1 < <(parseChannelSpec "${aChannelSpecs[$currentInt]}")
+    elif [[ "$interactive" == "true" ]]; then
+      read -r specChannel specBand specWidth specCenterFreq1 < <(promptChannelSpec "$currentInt")
+    fi
+
+    if [[ -n "$specChannel" ]]; then
+      applyChannelToPhy "$currentPhy" "$specChannel" "$specBand" "$specWidth" "$specCenterFreq1" "$verbose"
+    fi
 
     # Bring down the source interface before attempting to capture traffic on the monitor interface.
     sudo ip link set "$currentInt" down
@@ -468,13 +566,19 @@ function monitorList() {
 function monitorUsage() {
   echo "Usage: $(basename "$0") monitor <enable|disable|list> [options]"
   echo ""
-  echo "  enable [-i <interface>] [-n] [-v]"
+  echo "  enable [-i <interface>] [-n] [-v] [-C <specs>] [-I]"
   echo "    Create monitor-mode interfaces."
   echo "    -i <interface>: Operate on this single interface only, e.g. -i wlan1."
   echo "                    Default: all interfaces reported by iw dev."
   echo "    -n: Skip the internal interface (the first one iw dev reports), so its"
   echo "        network connection stays up during capture."
   echo "    -v: Print the interface/phy mapping and each step as it runs."
+  echo "    -C <specs>: Set a channel per interface as it's enabled. Comma-separated"
+  echo "                list of <interface>=<channel>:<band>[:<width>[:<centerfreq>]],"
+  echo "                e.g. -C \"wlan0=6:24,wlan1=36:5:80:5210\". An interface with no"
+  echo "                matching entry is left unset unless -I is also given."
+  echo "    -I: For any interface with no -C entry, interactively prompt for its"
+  echo "        channel/band/width. Requires a terminal; ignored otherwise."
   echo ""
   echo "  disable [-v]"
   echo "    Remove monitor-mode interfaces and restore their parent interfaces to managed mode."
@@ -591,6 +695,39 @@ function freqMain() {
 # band via calcCenterFreq (instead of a hardcoded channel table).
 #
 ##############################################################################################################
+##############################################################################################################
+#
+# applyChannelToPhy()
+#
+# Core of "set a channel on a phy": validate width/centerFreq1, check band
+# support, derive the control frequency, and issue the iw command. Shared by
+# channelSet and monitor enable's per-interface channel assignment.
+#
+##############################################################################################################
+function applyChannelToPhy() {
+  local lPhy=$1 lChannel=$2 lBand=$3 lWidth=$4 lCenterFreq1=$5 lVerbose=$6
+  local controlFreq
+
+  if [[ "$lWidth" -gt 20 && -z "$lCenterFreq1" ]]; then
+    err "$lPhy: a center frequency is required for channel widths greater than 20 MHz."
+    return 1
+  fi
+
+  checkBandSupported "$lPhy" "$lBand" || return 1
+
+  controlFreq=$(calcCenterFreq "$lChannel" "$lBand") || return 1
+
+  if [[ "$lVerbose" == "true" ]]; then
+    err "Setting $lPhy to control freq $controlFreq, width $lWidth${lCenterFreq1:+, center1 $lCenterFreq1}"
+  fi
+
+  if [[ -n "$lCenterFreq1" ]]; then
+    sudo iw phy "$lPhy" set freq "$controlFreq" "$lWidth" "$lCenterFreq1"
+  else
+    sudo iw phy "$lPhy" set freq "$controlFreq" "$lWidth"
+  fi
+}
+
 function channelUsage() {
   echo "Usage: $(basename "$0") channel set -p <phy> -c <channel> [options]"
   echo ""
@@ -607,7 +744,7 @@ function channelUsage() {
 
 function channelSet() {
   local OPTIND=1
-  local phyInt='' channel='' band='5' width='20' centerFreq1='' verbose='false' flag controlFreq
+  local phyInt='' channel='' band='5' width='20' centerFreq1='' verbose='false' flag
 
   while getopts "p:c:b:w:F:v" flag; do
     case "${flag}" in
@@ -627,24 +764,7 @@ function channelSet() {
     return 1
   fi
 
-  if [[ "$width" -gt 20 && -z "$centerFreq1" ]]; then
-    err "-F <center freq> is required for channel widths greater than 20 MHz."
-    return 1
-  fi
-
-  checkBandSupported "$phyInt" "$band" || return 1
-
-  controlFreq=$(calcCenterFreq "$channel" "$band") || return 1
-
-  if [[ "$verbose" == "true" ]]; then
-    err "Setting $phyInt to control freq $controlFreq, width $width${centerFreq1:+, center1 $centerFreq1}"
-  fi
-
-  if [[ -n "$centerFreq1" ]]; then
-    sudo iw phy "$phyInt" set freq "$controlFreq" "$width" "$centerFreq1"
-  else
-    sudo iw phy "$phyInt" set freq "$controlFreq" "$width"
-  fi
+  applyChannelToPhy "$phyInt" "$channel" "$band" "$width" "$centerFreq1" "$verbose"
 }
 
 function channelMain() {
@@ -741,7 +861,8 @@ function showHelp() {
   echo "Usage: $(basename "$0") <command> <subcommand> [options]"
   echo ""
   echo "Commands:"
-  echo "  monitor enable  [-i <interface>] [-n] [-v]    Create monitor-mode interfaces."
+  echo "  monitor enable  [-i <interface>] [-n] [-v] [-C <specs>] [-I]"
+  echo "                                                 Create monitor-mode interfaces."
   echo "  monitor disable [-v]                          Remove monitor-mode interfaces."
   echo "  monitor list                                  List phy/interface mappings, with"
   echo "                                                 each interface's current channel/band/width."

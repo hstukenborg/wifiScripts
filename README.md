@@ -3,7 +3,7 @@ Personal scripts used to manage capturing WiFi data on Linux
 
 # Files
 - wifictl : single entry point for managing 802.11 monitor mode capture. Subcommands:
-  - `wifictl monitor enable [-i <interface>] [-n] [-v]` : create monitor-mode interfaces
+  - `wifictl monitor enable [-i <interface>] [-n] [-v] [-C <specs>] [-I]` : create monitor-mode interfaces
   - `wifictl monitor disable [-v]`                       : remove monitor-mode interfaces, restore managed mode
   - `wifictl monitor list`                               : list phy/interface mappings, with each interface's current channel/band/width
   - `wifictl freq calc -c <channel> -b <band> [-v]`      : channel -> center frequency
@@ -18,6 +18,11 @@ Personal scripts used to manage capturing WiFi data on Linux
   issuing any commands (via `iw phy <phy> info`), and print the phy's current regulatory
   domain (via `iw reg get`) if the band isn't supported/usable. On an interactive terminal,
   they'll then offer to set a different country domain (`iw reg set <CC>`) and retry.
+
+  `monitor enable -C <specs>` sets a channel per interface as it's brought into monitor
+  mode, from a comma-separated `<interface>=<channel>:<band>[:<width>[:<centerfreq>]]` list
+  (e.g. `-C "wlan0=6:24,wlan1=36:5:80:5210"`). Add `-I` to interactively prompt for the
+  channel/band/width of any interface with no matching `-C` entry (requires a terminal).
 
 - iwoutput.txt : sample real-world `iw phy` output (multiple phys, 2.4/5/6 GHz), used as a
   fixture to validate wifictl's band-detection parsing against actual Linux formatting.
