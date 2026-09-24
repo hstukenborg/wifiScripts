@@ -121,6 +121,49 @@ function bandFreqRange() {
 
 ##############################################################################################################
 #
+# bandForFrequency()
+#
+# Print the band code (24/5/6) a frequency (MHz) falls into, using the same
+# ranges as bandFreqRange. Prints "?" and fails if it doesn't fall in any of
+# them.
+#
+##############################################################################################################
+function bandForFrequency() {
+  local lFreq=$1
+  local b range fmin fmax
+
+  for b in 24 5 6; do
+    range=$(bandFreqRange "$b")
+    fmin=${range% *}
+    fmax=${range#* }
+    if (( lFreq >= fmin && lFreq <= fmax )); then
+      echo "$b"
+      return 0
+    fi
+  done
+
+  echo "?"
+  return 1
+}
+
+##############################################################################################################
+#
+# bandLabel()
+#
+# Print a human-readable label for a band code (24/5/6), for display only.
+#
+##############################################################################################################
+function bandLabel() {
+  case "$1" in
+    24) echo "2.4GHz" ;;
+    5) echo "5GHz" ;;
+    6) echo "6GHz" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+##############################################################################################################
+#
 # phyForInterface()
 #
 # Print the phy (e.g. "phy0") that owns the given interface, via
@@ -397,18 +440,49 @@ function monitorDisable() {
 #
 # monitorList()
 #
+# List phy/interface mappings, plus each interface's current channel, band,
+# and width (via `iw dev <interface> info`), if it has one set.
+#
 ##############################################################################################################
 function monitorList() {
-  listPhyInterfaceMap
+  local lphy lif
+  while IFS='=' read -r lphy lif; do
+    local chanLine channel freq width band status
+
+    chanLine=$(iw dev "$lif" info 2>/dev/null | grep -m1 '^[[:space:]]*channel ')
+
+    if [[ -n "$chanLine" ]]; then
+      channel=$(grep -oE 'channel [0-9]+' <<< "$chanLine" | awk '{print $2}')
+      freq=$(grep -oE '\([0-9]+ MHz\)' <<< "$chanLine" | head -n1 | grep -oE '[0-9]+')
+      width=$(grep -oE 'width:[[:space:]]*[0-9]+ MHz' <<< "$chanLine" | grep -oE '[0-9]+')
+      band=$(bandForFrequency "$freq")
+      status="channel $channel, band $(bandLabel "$band"), width ${width:-?} MHz"
+    else
+      status="no channel set"
+    fi
+
+    echo "${lphy}=${lif} (${status})"
+  done < <(listPhyInterfaceMap)
 }
 
 function monitorUsage() {
   echo "Usage: $(basename "$0") monitor <enable|disable|list> [options]"
-  echo "  enable  [-i <interface>] [-n] [-v] : create monitor-mode interfaces"
-  echo "          -i <interface>: Operate on a single interface, e.g. -i wlan1."
-  echo "          -n: Ignore the internal interface, to keep a network connection up during capture."
-  echo "  disable [-v]                       : remove monitor-mode interfaces, restore managed mode"
-  echo "  list                                : list phy/interface mappings"
+  echo ""
+  echo "  enable [-i <interface>] [-n] [-v]"
+  echo "    Create monitor-mode interfaces."
+  echo "    -i <interface>: Operate on this single interface only, e.g. -i wlan1."
+  echo "                    Default: all interfaces reported by iw dev."
+  echo "    -n: Skip the internal interface (the first one iw dev reports), so its"
+  echo "        network connection stays up during capture."
+  echo "    -v: Print the interface/phy mapping and each step as it runs."
+  echo ""
+  echo "  disable [-v]"
+  echo "    Remove monitor-mode interfaces and restore their parent interfaces to managed mode."
+  echo "    -v: Print each interface as it's restored."
+  echo ""
+  echo "  list"
+  echo "    List phy/interface mappings, with each interface's current channel,"
+  echo "    band, and width (if any). Takes no options."
 }
 
 function monitorMain() {
@@ -485,9 +559,18 @@ function freqChannel() {
 
 function freqUsage() {
   echo "Usage: $(basename "$0") freq <calc|channel> [options]"
-  echo "  calc    -c <channel> -b <band> [-v]    : compute center frequency for a channel"
-  echo "  channel -f <frequency> -b <band> [-v]  : compute channel number for a frequency"
-  echo "  Bands: 24, 5, 6"
+  echo ""
+  echo "  calc -c <channel> -b <band> [-v]"
+  echo "    Compute the center frequency for a channel."
+  echo "    -c <channel>: Channel number. Required."
+  echo "    -b <band>: Band the channel belongs to. Options are 24,5,6. Default: 24."
+  echo "    -v: Print the result as a labeled message instead of just the number."
+  echo ""
+  echo "  channel -f <frequency> -b <band> [-v]"
+  echo "    Compute the channel number for a frequency."
+  echo "    -f <frequency>: Frequency in MHz. Required."
+  echo "    -b <band>: Band the frequency belongs to. Options are 24,5,6. Default: 24."
+  echo "    -v: Print the result as a labeled message instead of just the number."
 }
 
 function freqMain() {
@@ -510,13 +593,16 @@ function freqMain() {
 ##############################################################################################################
 function channelUsage() {
   echo "Usage: $(basename "$0") channel set -p <phy> -c <channel> [options]"
-  echo "  -p <phy>: Physical interface to set the frequency on, e.g. phy0. Required."
-  echo "  -c <channel>: Channel number to derive the control frequency from. Required."
-  echo "  -b <band>: Band the channel belongs to. Options are 24,5,6. Default: 5."
-  echo "  -w <width>: Channel width in MHz, e.g. 20,40,80,160. Default: 20."
-  echo "  -F <center freq>: Center frequency of the whole bonded channel. Required if"
-  echo "     -w is greater than 20, since it can't be derived from the channel alone."
-  echo "  -v: Use verbose output."
+  echo ""
+  echo "  set -p <phy> -c <channel> [-b <band>] [-w <width>] [-F <center freq>] [-v]"
+  echo "    Set the operating frequency on a phy, derived from a channel/band."
+  echo "    -p <phy>: Physical interface to set the frequency on, e.g. phy0. Required."
+  echo "    -c <channel>: Channel number to derive the control frequency from. Required."
+  echo "    -b <band>: Band the channel belongs to. Options are 24,5,6. Default: 5."
+  echo "    -w <width>: Channel width in MHz, e.g. 20,40,80,160. Default: 20."
+  echo "    -F <center freq>: Center frequency of the whole bonded channel. Required if"
+  echo "       -w is greater than 20, since it can't be derived from the channel alone."
+  echo "    -v: Print the frequency/width being set before issuing the command."
 }
 
 function channelSet() {
@@ -577,10 +663,11 @@ function channelMain() {
 ##############################################################################################################
 function scanUsage() {
   echo "Usage: $(basename "$0") scan [-i <interface>] [-b <band>] [-s <ssid>] [-v]"
-  echo "  -i <interface>: Interface to scan on. Default: wlan0."
-  echo "  -b <band>: Restrict results to a band. Options are 24,5,6."
-  echo "  -s <ssid>: Restrict results to SSIDs containing this string."
-  echo "  -v: Use verbose output."
+  echo "    -i <interface>: Interface to scan on. Default: wlan0."
+  echo "    -b <band>: Restrict results to a band (checked against the interface's"
+  echo "               phy first). Options are 24,5,6."
+  echo "    -s <ssid>: Restrict results to SSIDs containing this string."
+  echo "    -v: Print the filters in effect before scanning."
 }
 
 ##############################################################################################################
@@ -595,12 +682,13 @@ function scanRun() {
   local OPTIND=1
   local iface='wlan0' band='' ssid='' verbose='false' flag
 
-  while getopts "i:b:s:v" flag; do
+  while getopts "i:b:s:vh" flag; do
     case "${flag}" in
       i) iface="${OPTARG}" ;;
       b) band="${OPTARG}" ;;
       s) ssid="${OPTARG}" ;;
       v) verbose='true' ;;
+      h) scanUsage; return 0 ;;
       *) err "Invalid option: ${flag}"; return 1 ;;
     esac
   done
@@ -655,13 +743,17 @@ function showHelp() {
   echo "Commands:"
   echo "  monitor enable  [-i <interface>] [-n] [-v]    Create monitor-mode interfaces."
   echo "  monitor disable [-v]                          Remove monitor-mode interfaces."
-  echo "  monitor list                                  List phy/interface mappings."
+  echo "  monitor list                                  List phy/interface mappings, with"
+  echo "                                                 each interface's current channel/band/width."
   echo "  freq calc       -c <channel> -b <band> [-v]   Channel -> center frequency."
   echo "  freq channel    -f <frequency> -b <band> [-v] Frequency -> channel."
   echo "  channel set     -p <phy> -c <channel> [-b <band>] [-w <width>] [-F <freq>] [-v]"
   echo "                                                 Set the operating frequency on a phy."
-  echo "  scan            [-i <interface>] [-b <band>] [-s <ssid>]"
+  echo "  scan            [-i <interface>] [-b <band>] [-s <ssid>] [-v]"
   echo "                                                 Trigger a wpa_cli scan, filter by band and/or SSID."
+  echo ""
+  echo "Run a command with no subcommand (e.g. \"$(basename "$0") monitor\") to see the"
+  echo "full option descriptions for that command."
   echo ""
   echo "Run without arguments, or with -h/--help, to show this message."
   echo ""
