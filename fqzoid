@@ -1,38 +1,11 @@
 #!/usr/bin/env bash
 #
-# Small tool to quickly calculate center frequency for a given 
+# Small tool to quickly calculate center frequency for a given
 # channel and width on a specified band.
 #
+# See lib/wifi-common.sh for the underlying formulas.
 
-##############################################################################################################
-#
-# Forumlas
-#
-##############################################################################################################
-# 2.4 GHz
-# Basic Formula: Frequency (MHz) = (Channel Number × 5) + 2407 (with adjustments for specific channels).
-# [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5.
-#
-# 5 GHz
-# Basic Formula (UNII-1): Frequency (MHz): (Channel Number × 5) + 5000 (or a base offset like 5170 for channel
-# 34).
-# [Wi-Fi 7]: Center Frequency = 5000 + (Channel Number * 5). For example, ch44 == 44*5 = 220 + 5000 == 5220.
-# 
-# 6 GHz
-# Basic Forumla: Center Frequency = 5950 + (5 * Channel Number).
-##############################################################################################################
-
-
-######
-#
-# err()
-#
-# Taken from Google Style Guide
-#
-######
-function err() {
-  echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
-}
+source "$(dirname "${BASH_SOURCE[0]}")/lib/wifi-common.sh"
 
 function showHelp() {
   echo "*******************************************************************************"
@@ -47,60 +20,6 @@ function showHelp() {
   echo "-h: Show this help."
   echo ""
 
-}
-
-##############################################################################################################
-# Calculate 2.4/5/6 GHz center frequency.
-# Basic Formulas:
-# - 2.4 GHz == Frequency (MHz) = (Channel Number * 5) + 2407 (else 2484 for ch 14).
-# [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5
-# - 5 GHz == 5000 + channel * 5
-# - 6 GHz == 5950 + channel * 5
-##############################################################################################################
-function calcCenterFreq() {
-  local -i lChannel=$1
-  local -i cFrequency
-
-  case "${band}" in
-    24) if [ $lChannel -eq 14 ]; then 
-          cFrequency=2484
-        elif [ $lChannel -gt 14 ]; then
-          err "Invalid channel: $lChannel"
-        else
-          cFrequency=$((2407 + lChannel * 5))
-        fi 
-        ;;
-    5) cFrequency=$((5000 + lChannel * 5)) ;;
-    6) cFrequency=$((5950 + lChannel * 5)) ;;
-    *) err "Invalid Channel: $lChannel" ;;
-  esac
-
-  echo "$cFrequency"
-}
-##############################################################################################################
-#
-# getChannelFromFrequency()
-#
-# This function returns the channel number for a given frequency, band, and width.
-#
-##############################################################################################################
-function getChannelFromFrequency() {
-  local -i lFrequency=$1
-  local -i cChannel
-
-  case "${band}" in
-    24) if [ $lFrequency -eq 2484 ]; then 
-          cChannel=14
-        else
-          cChannel=$(((lFrequency-2407) / 5))
-        fi 
-        ;;
-    5) cChannel=$(((lFrequency-5000) / 5)) ;;
-    6) cChannel=$(((lFrequency-5950) / 5)) ;;
-    *) err "Invalid Frequency" ;;
-  esac
-
-  echo "$cChannel"
 }
 
 ##############################################################################################################
@@ -126,15 +45,15 @@ centerFrequency=''
 
 
 if [[ -n "$startChannel" ]]; then
-  centerFrequency=$(calcCenterFreq "${startChannel}")
+  centerFrequency=$(calcCenterFreq "${startChannel}" "${band}")
   # Print out the center frequency
   if [[ "$verbose" == "true" ]]; then
     err "Frequency == $centerFrequency"
-  else 
+  else
     echo "$centerFrequency"
   fi
 elif [[ -n "$startFrequency" ]]; then
-  clientChannel=$(getChannelFromFrequency "${startFrequency}")
+  clientChannel=$(getChannelFromFrequency "${startFrequency}" "${band}")
   # Print out the client channel
   if [[ "$verbose" == "true" ]]; then
     err "Channel == $clientChannel"

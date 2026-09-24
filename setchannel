@@ -1,48 +1,67 @@
 #!/usr/bin/env bash
+#
+# Set the operating frequency for a monitor-mode phy, given a channel and
+# band (via the shared calcCenterFreq), instead of a hardcoded channel table.
 
-# This script sets the frequency of the specified channel for the specified 
-# adapter, or defaults to mon0 if no adapter is specified.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/wifi-common.sh"
 
-######
-#
-# err()
-#
-# Taken from Google Style Guide
-#
-######
-function err() {
-  echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
+function showHelp() {
+  echo "*******************************************************************************"
+  echo "$(basename "$0") sets the operating frequency for a monitor-mode phy.          "
+  echo "*******************************************************************************"
+  echo "Available options:"
+  echo "-p <phy>: Physical interface to set the frequency on, e.g. phy0. Required."
+  echo "-c <channel>: Channel number to derive the control frequency from. Required."
+  echo "-b <band>: Band the channel belongs to. Options are 24,5,6. Default: 5."
+  echo "-w <width>: Channel width in MHz, e.g. 20,40,80,160. Default: 20."
+  echo "-F <center freq>: Center frequency of the whole bonded channel. Required if"
+  echo "   -w is greater than 20, since it can't be derived from the channel alone."
+  echo "-v: Use verbose output."
+  echo "-h: Show this help."
+  echo ""
+
 }
 
 # Argument processing
+phyInt=''
+startChannel=''
+band='5'
+width='20'
+centerFreq1=''
 verbose='false'
 
-while getopts "ip:v" flag; do
+while getopts "p:c:b:w:F:vh" flag; do
   case "${flag}" in
-    i) ignoreInt='true' ;;
     p) phyInt="${OPTARG}" ;;
+    c) startChannel="${OPTARG}" ;;
+    b) band="${OPTARG}" ;;
+    w) width="${OPTARG}" ;;
+    F) centerFreq1="${OPTARG}" ;;
     v) verbose='true' ;;
+    h) showHelp; exit 0 ;;
     *) err "Invalid option: ${flag}" ;;
   esac
 done
 
+if [[ -z "$phyInt" || -z "$startChannel" ]]; then
+  err "Both -p <phy> and -c <channel> are required."
+  showHelp
+  exit 1
+fi
 
+if [[ "$width" -gt 20 && -z "$centerFreq1" ]]; then
+  err "-F <center freq> is required for channel widths greater than 20 MHz."
+  exit 1
+fi
 
-# Issue command based on the requested channel
-case "$1" in
+controlFreq=$(calcCenterFreq "$startChannel" "$band") || exit 1
 
-	181)
-		iw phy phy0 set freq 6855 80 6865
-		;;
-	197)
-		iw phy phy0 set freq 6935 80 6945
-		;;
-	213)
-		iw phy phy0 set freq 7015 80 7025
-		;;
-	44)	iw phy phy0 set freq 5220 40 5230
-		;;
-	*)
-		echo "Unknown channel."
-		;;
-esac
+if [[ "$verbose" == "true" ]]; then
+  err "Setting $phyInt to control freq $controlFreq, width $width${centerFreq1:+, center1 $centerFreq1}"
+fi
+
+if [[ -n "$centerFreq1" ]]; then
+  sudo iw phy "$phyInt" set freq "$controlFreq" "$width" "$centerFreq1"
+else
+  sudo iw phy "$phyInt" set freq "$controlFreq" "$width"
+fi

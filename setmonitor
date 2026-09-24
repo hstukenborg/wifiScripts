@@ -3,76 +3,9 @@
 # This script is designed to setup the current Linux system to capture 802.11 monitor mode
 # traffic from any or all available supported interfaces.
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/wifi-common.sh"
+
 # Functions
-
-##############################################################################################################
-#
-# err()
-#
-# Output supplied text to stderr.
-#
-##############################################################################################################
-function err() {
-  echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
-}
-
-##############################################################################################################
-# Calculate 2.4/5/6 GHz center frequency.
-# Basic Formulas:
-# - 2.4 GHz == Frequency (MHz) = (Channel Number * 5) + 2407 (else 2484 for ch 14).
-# [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5
-# - 5 GHz == 5000 + channel * 5
-# - 6 GHz == 5950 + channel * 5
-##############################################################################################################
-function calcCenterFreq() {
-  local -i lChannel=$1
-  local -i lBand=$2
-  local -i cFrequency
-
-  case "${lBand}" in
-    24) if [ $lChann  echo "$lBand"el -eq 14 ]; then
-          cFrequency=2484
-        elif [ $lChannel -gt 14 ]; then
-          err "Invalid channel: $lChannel"
-        else
-          cFrequency=$((2407 + lChannel * 5))
-        fi
-        ;;
-    5) cFrequency=$((5000 + lChannel * 5)) ;;
-    6) cFrequency=$((5950 + lChannel * 5)) ;;
-    *) err "Invalid Channel: $lChannel" ;;
-  esac
-
-  echo "$cFrequency"
-}
-
-##############################################################################################################
-#
-# getChannelFromFrequency()
-#
-# This function returns the channel number for a given frequency, band, and width.
-#
-##############################################################################################################
-function getChannelFromFrequency() {
-  local -i lFrequency=$1
-  local -i cChannel
-  local -i lBand=$2
-
-  case "${lBand}" in
-    24) if [ $lFrequency -eq 2484 ]; then
-          cChannel=14
-        else
-          cChannel=$(((lFrequency-2407) / 5))
-        fi
-        ;;
-    5) cChannel=$(((lFrequency-5000) / 5)) ;;
-    6) cChannel=$(((lFrequency-5950) / 5)) ;;
-    *) err "Invalid Frequency" ;;
-  esac
-
-  echo "$cChannel"
-}
-
 
 ##############################################################################################################
 #
@@ -83,46 +16,43 @@ function getChannelFromFrequency() {
 ##############################################################################################################
 function enableMonitor() {
 
-  # In case of any external interfaces, get the list of available interfaces
-  # and phy numbers, then use the last one as the base number for phy/wlan/mon.
-  # This is a bash-specific syntax that removes unwanted new lines as elements.
-  # The '-t' option for mapfile removes trailing newlines from each line read.
-  declare -a aInterfaces aPhysical
+  # Map every wlan-type interface to the phy it actually belongs to (see
+  # listPhyInterfaceMap for why this replaces the old sorted/extracted
+  # numeric-suffix pairing).
+  declare -A aMappedInterfaces
+  local -a aOrder=()
+  local lphy lif
 
-  # If a single interface is specificed, set up the arrays appropriately
+  while IFS='=' read -r lphy lif; do
+    aMappedInterfaces[$lif]=$lphy
+    aOrder+=("$lif")
+  done < <(listPhyInterfaceMap)
+
   if [[ -n "$singleInterface" ]]; then
-    aInterfaces[0]="$singleInterface"
-    mapfile -t aPhysical < <(iw dev | grep -B1 "$singleInterface" | sed /"$singleInterface"/d)
-  else
-    mapfile -t aInterfaces < <(ip link show | awk '/wlan/ {print $2}' | grep -E -o '([0-9]+)')
-    mapfile -t aPhysical < <(iw dev | awk -F '\#' '/phy/ {print $2}' | sort)
+    if [[ -z "${aMappedInterfaces[$singleInterface]:-}" ]]; then
+      err "Interface not found: $singleInterface"
+      return 1
+    fi
+    aOrder=("$singleInterface")
+  elif [[ "$noInternal" == "true" && ${#aOrder[@]} -gt 0 ]]; then
+    # Assume the first interface `iw dev` reports is the internal adapter, and
+    # skip it so the primary network connection survives the capture.
+    aOrder=("${aOrder[@]:1}")
   fi
-
-  # Check if we need to ignore the internal adapter and remove it from the arrays.
-  if [[ "$noInternal" == "true" ]]; then
-    unset 'aInterfaces[0]'
-    unset 'aPhysical[0]'
-  fi
-
-  # Now create an Associative array that maps the physical and wlan interfaces, as they can be different.
-  declare -A aMappedInterfaces;
-
-  for i in "${!aInterfaces[@]}"; do
-    aMappedInterfaces[${aInterfaces[$i]}]=${aPhysical[$i]}
-  done
 
   if [[ "$verbose" == "true" ]]; then
-    # Quick print out of the mapping
-    for i in "${!aMappedInterfaces[@]}"; do
-      err "wlan$i is ${aMappedInterfaces[$i]}"
+    for lif in "${aOrder[@]}"; do
+      err "$lif is ${aMappedInterfaces[$lif]}"
     done
   fi
 
-  # Loop through the array and create a matching monitor for each wlan interface
-  for interface in "${!aMappedInterfaces[@]}"; do
-    currentInt="wlan$interface"
-    currentPhy="phy${aMappedInterfaces[$interface]}"
-    currentMon="mon$interface"
+  # Loop through the ordered interfaces and create a matching monitor for each.
+  local monIndex=0
+  for lif in "${aOrder[@]}"; do
+    currentInt="$lif"
+    currentPhy="${aMappedInterfaces[$lif]}"
+    currentMon="mon${monIndex}"
+    monIndex=$((monIndex + 1))
 
     if [[ "$verbose" == "true" ]]; then
       echo "current interface: $currentInt"
@@ -130,16 +60,20 @@ function enableMonitor() {
       echo "current monitor: $currentMon"
     fi
 
-    # Enable the wlanX interface (just in case):
+    # Hand the interface off from NetworkManager before touching it, instead
+    # of fighting it mid-script or stopping the service system-wide.
+    sudo nmcli device set "$currentInt" managed no 2>/dev/null
+
+    # Enable the interface (just in case):
     sudo ip link show "$currentInt" | grep -w UP >/dev/null || sudo ip link set "$currentInt" up
 
-    # Add physical interface mon0 set in monitor mode.
+    # Add a monitor-mode interface on the matching phy.
     sudo iw phy "$currentPhy" interface add "$currentMon" type monitor
 
-    # Bring up the monX interface.
+    # Bring up the monitor interface.
     sudo ip link set "$currentMon" up
 
-    # Initiate a scan via wlanX, but hide the results.
+    # Initiate a scan via the source interface, but hide the results.
     # NOTE: This is specifically for Intel interfaces that rely upon
     # Location Aware Regulatory to enable channels for a given frequency
     # (specifically 6 GHz).
@@ -148,7 +82,7 @@ function enableMonitor() {
     # Set the region to US (by default):
     sudo iw reg set US
 
-    # bring down wlanX interface before attempting to capture traffic on monX.
+    # Bring down the source interface before attempting to capture traffic on the monitor interface.
     sudo ip link set "$currentInt" down
   done
 }
@@ -157,7 +91,7 @@ function enableMonitor() {
 #
 # disableMonitor()
 #
-# Remove the monitor mode interface and reset the main interface back to managed.
+# Remove the monitor mode interfaces and restore their parent interfaces to managed mode.
 #
 ##############################################################################################################
 function disableMonitor() {
@@ -166,20 +100,40 @@ function disableMonitor() {
     err "Attempting to disable monitor interfaces."
   fi
 
-  # Build an array of monitor interfaces.
-  mapfile -t aInterfaces the channel for a given monitor-mode interfaceces < <(ip link show | awk '/mon/ {print $2}' | grep -E -o '([0-9]+)')
+  # Map every non-monitor interface to its phy, so each monitor interface can
+  # be traced back to the interface it needs to restore via the phy the
+  # kernel actually reports it on, rather than assuming a shared numeric
+  # suffix (e.g. mon0 -> wlan0).
+  declare -A aPhyToInterface
+  local lphy lif
+  while IFS='=' read -r lphy lif; do
+    [[ "$lif" =~ ^mon[0-9]+$ ]] && continue
+    aPhyToInterface[$lphy]=$lif
+  done < <(listPhyInterfaceMap)
+
+  local -a aMonitors=()
+  mapfile -t aMonitors < <(iw dev | awk '/Interface/{print $2}' | grep -E '^mon[0-9]+$')
 
   # Bring down any online monitor interfaces and delete them.
-  for interface in "${aInterfaces[@]}"; do
-    sudo ip link show mon"$interface" | grep -w UP>/dev/null && sudo ip link set mon"$interface" down
-    sudo iw dev mon"$interface" del
+  for monIf in "${aMonitors[@]}"; do
+    local monPhy
+    monPhy=$(iw dev "$monIf" info 2>/dev/null | awk '/wiphy/{print "phy"$2}')
+
+    sudo ip link show "$monIf" | grep -w UP >/dev/null && sudo ip link set "$monIf" down
+    sudo iw dev "$monIf" del
 
     # Restore the linked interface to managed.
-    sudo iw wlan"$interface" set type managed
-    sudo ip link set wlan"$interface" up
+    local parentInt="${aPhyToInterface[$monPhy]:-}"
+    if [[ -n "$parentInt" ]]; then
+      sudo iw "$parentInt" set type managed
+      sudo ip link set "$parentInt" up
+      sudo nmcli device set "$parentInt" managed yes 2>/dev/null
 
-    if [[ "$verbose" == "true" ]]; then
-      err "Removed monitor interface mon$interface"
+      if [[ "$verbose" == "true" ]]; then
+        err "Removed monitor interface $monIf, restored $parentInt to managed"
+      fi
+    elif [[ "$verbose" == "true" ]]; then
+      err "Removed monitor interface $monIf (no parent interface found to restore)"
     fi
   done
 
@@ -208,8 +162,8 @@ function setChannel() {
 ##############################################################################################################
 function listInterfaces() {
 
-  # List all of the current physical interfaces along with the matching WLAN
-  iw dev | awk '/phy/{ PHY=$0; next } /Interface/{ print PHY "=" $2 }'
+  # List all of the current physical interfaces along with the matching WLAN interface.
+  listPhyInterfaceMap
 
 }
 
@@ -311,10 +265,4 @@ elif [[ "$disableMonitor" == "true" ]]; then
 else
   err "Nothing to do - exiting."
   exit 1
-fi
-
-# If using the internal adapter, then we need to ensure NetworkManager service
-# is down.
-if [[ "$noInternal" == "false" ]]; then
-  sudo systemctl stop NetworkManager 2>/dev/null
 fi
