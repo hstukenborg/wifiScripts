@@ -102,6 +102,43 @@ function listPhyInterfaceMap() {
 
 ##############################################################################################################
 #
+# listManagedPhyInterfaceMap()
+#
+# Like listPhyInterfaceMap, but only interfaces currently of type "managed".
+# A phy can have more than one interface (a leftover monitor interface from
+# an interrupted previous run, an auto-created P2P-device/AP virtual
+# interface, etc.) -- code that decides which interfaces to convert to
+# monitor mode needs exactly the real, convertible one per phy, not every
+# entry iw dev happens to list.
+#
+##############################################################################################################
+function listManagedPhyInterfaceMap() {
+  iw dev | awk '
+    /^phy/ { PHY=$0; sub(/#/, "", PHY); next }
+    /^[[:space:]]*Interface / { IF=$2; next }
+    /^[[:space:]]*type / { if ($2 == "managed") print PHY "=" IF }
+  '
+}
+
+##############################################################################################################
+#
+# nextFreeMonitorName()
+#
+# Print the first "monN" name (N starting at 0) that isn't already an
+# existing interface, so a leftover monitor interface from a prior run can
+# never collide with -- or get silently reused for -- a newly created one.
+#
+##############################################################################################################
+function nextFreeMonitorName() {
+  local -i n=0
+  while ip link show "mon${n}" &>/dev/null; do
+    n=$((n + 1))
+  done
+  echo "mon${n}"
+}
+
+##############################################################################################################
+#
 # bandFreqRange()
 #
 # Print "<min> <max>" MHz bounds for a band. Shared by scan's band filter and
@@ -491,9 +528,14 @@ function monitorEnable() {
     done
   fi
 
-  # Map every wlan-type interface to the phy it actually belongs to (see
-  # listPhyInterfaceMap for why this replaces sorted/extracted numeric-suffix
-  # pairing).
+  # Map every currently-managed interface to the phy it actually belongs to
+  # (see listPhyInterfaceMap for why this replaces sorted/extracted numeric-
+  # suffix pairing). Restricted to type "managed" so a leftover monitor
+  # interface from an interrupted previous run, or an auto-created
+  # P2P-device/AP virtual interface sharing the same phy, is never
+  # mistaken for a fresh interface to convert -- either of those would
+  # otherwise add a second monitor interface on a phy that already has one,
+  # and would throw off which entry -n treats as "the internal interface".
   declare -A aMappedInterfaces
   local -a aOrder=()
   local lphy lif
@@ -501,7 +543,7 @@ function monitorEnable() {
   while IFS='=' read -r lphy lif; do
     aMappedInterfaces[$lif]=$lphy
     aOrder+=("$lif")
-  done < <(listPhyInterfaceMap)
+  done < <(listManagedPhyInterfaceMap)
 
   if [[ -n "$singleInterface" ]]; then
     if [[ -z "${aMappedInterfaces[$singleInterface]:-}" ]]; then
@@ -510,8 +552,8 @@ function monitorEnable() {
     fi
     aOrder=("$singleInterface")
   elif [[ "$noInternal" == "true" && ${#aOrder[@]} -gt 0 ]]; then
-    # Assume the first interface `iw dev` reports is the internal adapter, and
-    # skip it so the primary network connection survives the capture.
+    # Assume the first managed interface `iw dev` reports is the internal
+    # adapter, and skip it so the primary network connection survives the capture.
     aOrder=("${aOrder[@]:1}")
   fi
 
@@ -522,13 +564,11 @@ function monitorEnable() {
   fi
 
   # Loop through the ordered interfaces and create a matching monitor for each.
-  local monIndex=0
   local currentInt currentPhy currentMon
   for lif in "${aOrder[@]}"; do
     currentInt="$lif"
     currentPhy="${aMappedInterfaces[$lif]}"
-    currentMon="mon${monIndex}"
-    monIndex=$((monIndex + 1))
+    currentMon=$(nextFreeMonitorName)
 
     if [[ "$verbose" == "true" ]]; then
       echo "current interface: $currentInt"
@@ -544,7 +584,10 @@ function monitorEnable() {
     sudo ip link show "$currentInt" | grep -w UP >/dev/null || sudo ip link set "$currentInt" up
 
     # Add a monitor-mode interface on the matching phy.
-    sudo iw phy "$currentPhy" interface add "$currentMon" type monitor
+    if ! sudo iw phy "$currentPhy" interface add "$currentMon" type monitor; then
+      err "Failed to create $currentMon on $currentPhy; skipping $currentInt."
+      continue
+    fi
 
     # Bring up the monitor interface.
     sudo ip link set "$currentMon" up
@@ -605,16 +648,18 @@ function monitorDisable() {
     err "Attempting to disable monitor interfaces."
   fi
 
-  # Map every non-monitor interface to its phy, so each monitor interface can
+  # Map every managed-type interface to its phy, so each monitor interface can
   # be traced back to the interface it needs to restore via the phy the
   # kernel actually reports it on, rather than assuming a shared numeric
-  # suffix (e.g. mon0 -> wlan0).
+  # suffix (e.g. mon0 -> wlan0). Restricted to type "managed" for the same
+  # reason as listManagedPhyInterfaceMap: a phy can have more than one
+  # non-monitor interface (P2P-device, AP, ...), and a name-based guess could
+  # pick the wrong one to restore.
   declare -A aPhyToInterface
   local lphy lif
   while IFS='=' read -r lphy lif; do
-    [[ "$lif" =~ ^mon[0-9]+$ ]] && continue
     aPhyToInterface[$lphy]=$lif
-  done < <(listPhyInterfaceMap)
+  done < <(listManagedPhyInterfaceMap)
 
   local -a aMonitors=()
   mapfile -t aMonitors < <(iw dev | awk '/Interface/{print $2}' | grep -E '^mon[0-9]+$')
@@ -679,8 +724,8 @@ function monitorUsage() {
   echo "    Create monitor-mode interfaces."
   echo "    -i <interface>: Operate on this single interface only, e.g. -i wlan1."
   echo "                    Default: all interfaces reported by iw dev."
-  echo "    -n: Skip the internal interface (the first one iw dev reports), so its"
-  echo "        network connection stays up during capture."
+  echo "    -n: Skip the internal interface (the first managed interface iw dev reports),"
+  echo "        so its network connection stays up during capture."
   echo "    -v: Print the interface/phy mapping and each step as it runs."
   echo "    -C <specs>: Set a channel per interface as it's enabled. Comma-separated"
   echo "                list of <interface>=<channel>:<band>[:<width>[:<centerfreq>]],"
