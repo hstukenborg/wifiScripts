@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+#
+# wifictl - single entry point for managing 802.11 monitor mode capture on Linux.
+#
+# Consolidates monitor-mode interface management (formerly setmonitor),
+# channel/frequency math (formerly fqzoid), operating-frequency control
+# (formerly setchannel), phy/interface listing (formerly listphy.sh), and
+# scanning (formerly wifiscan) into one script with subcommands.
+
+set -u
+
+##############################################################################################################
+#
+# err()
+#
+# Output supplied text to stderr.
+#
+# Taken from Google Style Guide.
+#
+##############################################################################################################
+function err() {
+  echo "[$(date +'%Y-%m-%dT_%H:%M:%S%z')]: $*" >&2
+}
+
+##############################################################################################################
+#
+# calcCenterFreq()
+#
+# Calculate 2.4/5/6 GHz center frequency.
+# Basic Formulas:
+# - 2.4 GHz == Frequency (MHz) = (Channel Number * 5) + 2407 (else 2484 for ch 14).
+# [Wi-Fi 7]: Center Frequency: 2412 + (Channel Number - 1) * 5
+# - 5 GHz == 5000 + channel * 5
+# - 6 GHz == 5950 + channel * 5
+#
+##############################################################################################################
+function calcCenterFreq() {
+  local -i lChannel=$1
+  local lBand=$2
+  local -i cFrequency
+
+  case "${lBand}" in
+    24) if [ "$lChannel" -eq 14 ]; then
+          cFrequency=2484
+        elif [ "$lChannel" -gt 14 ]; then
+          err "Invalid channel: $lChannel"
+          return 1
+        else
+          cFrequency=$((2407 + lChannel * 5))
+        fi
+        ;;
+    5) cFrequency=$((5000 + lChannel * 5)) ;;
+    6) cFrequency=$((5950 + lChannel * 5)) ;;
+    *) err "Invalid band: $lBand"; return 1 ;;
+  esac
+
+  echo "$cFrequency"
+}
+
+##############################################################################################################
+#
+# getChannelFromFrequency()
+#
+# This function returns the channel number for a given frequency and band.
+#
+##############################################################################################################
+function getChannelFromFrequency() {
+  local -i lFrequency=$1
+  local lBand=$2
+  local -i cChannel
+
+  case "${lBand}" in
+    24) if [ "$lFrequency" -eq 2484 ]; then
+          cChannel=14
+        else
+          cChannel=$(((lFrequency - 2407) / 5))
+        fi
+        ;;
+    5) cChannel=$(((lFrequency - 5000) / 5)) ;;
+    6) cChannel=$(((lFrequency - 5950) / 5)) ;;
+    *) err "Invalid band: $lBand"; return 1 ;;
+  esac
+
+  echo "$cChannel"
+}
+
+##############################################################################################################
+#
+# listPhyInterfaceMap()
+#
+# Print "phyN=interface" pairs by walking `iw dev` output and associating
+# each Interface with the phy block it actually appears under (adjacency in
+# the output), rather than assuming interface/phy numeric suffixes line up.
+# That assumption breaks whenever wlanN doesn't map to phyN (e.g. a USB
+# adapter enumerated as phy0 but renamed wlan1), and it breaks entirely on
+# systems using predictable interface names (wlp3s0, wlx00c0ca..., etc).
+#
+##############################################################################################################
+function listPhyInterfaceMap() {
+  iw dev | awk '/phy/{ PHY=$0; sub(/#/, "", PHY); next } /Interface/{ print PHY "=" $2 }'
+}
+
+##############################################################################################################
+#
+# monitorEnable()
+#
+# Create monitor interfaces for the specified physical interfaces.
+#
+##############################################################################################################
+function monitorEnable() {
+  local OPTIND=1
+  local singleInterface='' noInternal='false' verbose='false' flag
+
+  while getopts "i:nv" flag; do
+    case "${flag}" in
+      i) singleInterface="${OPTARG}" ;;
+      n) noInternal='true' ;;
+      v) verbose='true' ;;
+      *) err "Invalid option: ${flag}"; return 1 ;;
+    esac
+  done
+
+  # Map every wlan-type interface to the phy it actually belongs to (see
+  # listPhyInterfaceMap for why this replaces sorted/extracted numeric-suffix
+  # pairing).
+  declare -A aMappedInterfaces
+  local -a aOrder=()
+  local lphy lif
+
+  while IFS='=' read -r lphy lif; do
+    aMappedInterfaces[$lif]=$lphy
+    aOrder+=("$lif")
+  done < <(listPhyInterfaceMap)
+
+  if [[ -n "$singleInterface" ]]; then
+    if [[ -z "${aMappedInterfaces[$singleInterface]:-}" ]]; then
+      err "Interface not found: $singleInterface"
+      return 1
+    fi
+    aOrder=("$singleInterface")
+  elif [[ "$noInternal" == "true" && ${#aOrder[@]} -gt 0 ]]; then
+    # Assume the first interface `iw dev` reports is the internal adapter, and
+    # skip it so the primary network connection survives the capture.
+    aOrder=("${aOrder[@]:1}")
+  fi
+
+  if [[ "$verbose" == "true" ]]; then
+    for lif in "${aOrder[@]}"; do
+      err "$lif is ${aMappedInterfaces[$lif]}"
+    done
+  fi
+
+  # Loop through the ordered interfaces and create a matching monitor for each.
+  local monIndex=0
+  local currentInt currentPhy currentMon
+  for lif in "${aOrder[@]}"; do
+    currentInt="$lif"
+    currentPhy="${aMappedInterfaces[$lif]}"
+    currentMon="mon${monIndex}"
+    monIndex=$((monIndex + 1))
+
+    if [[ "$verbose" == "true" ]]; then
+      echo "current interface: $currentInt"
+      echo "current phy: $currentPhy"
+      echo "current monitor: $currentMon"
+    fi
+
+    # Hand the interface off from NetworkManager before touching it, instead
+    # of fighting it mid-script or stopping the service system-wide.
+    sudo nmcli device set "$currentInt" managed no 2>/dev/null
+
+    # Enable the interface (just in case):
+    sudo ip link show "$currentInt" | grep -w UP >/dev/null || sudo ip link set "$currentInt" up
+
+    # Add a monitor-mode interface on the matching phy.
+    sudo iw phy "$currentPhy" interface add "$currentMon" type monitor
+
+    # Bring up the monitor interface.
+    sudo ip link set "$currentMon" up
+
+    # Initiate a scan via the source interface, but hide the results.
+    # NOTE: This is specifically for Intel interfaces that rely upon
+    # Location Aware Regulatory to enable channels for a given frequency
+    # (specifically 6 GHz).
+    sudo iw "$currentInt" scan > /dev/null
+
+    # Set the region to US (by default):
+    sudo iw reg set US
+
+    # Bring down the source interface before attempting to capture traffic on the monitor interface.
+    sudo ip link set "$currentInt" down
+  done
+
+  if [[ "$verbose" == "true" ]]; then
+    echo "Created the following monitor interfaces: "
+    ip link show | grep -Eo '(mon[0-9]+)'
+  fi
+}
+
+##############################################################################################################
+#
+# monitorDisable()
+#
+# Remove the monitor mode interfaces and restore their parent interfaces to managed mode.
+#
+##############################################################################################################
+function monitorDisable() {
+  local OPTIND=1
+  local verbose='false' flag
+
+  while getopts "v" flag; do
+    case "${flag}" in
+      v) verbose='true' ;;
+      *) err "Invalid option: ${flag}"; return 1 ;;
+    esac
+  done
+
+  if [[ "$verbose" == "true" ]]; then
+    err "Attempting to disable monitor interfaces."
+  fi
+
+  # Map every non-monitor interface to its phy, so each monitor interface can
+  # be traced back to the interface it needs to restore via the phy the
+  # kernel actually reports it on, rather than assuming a shared numeric
+  # suffix (e.g. mon0 -> wlan0).
+  declare -A aPhyToInterface
+  local lphy lif
+  while IFS='=' read -r lphy lif; do
+    [[ "$lif" =~ ^mon[0-9]+$ ]] && continue
+    aPhyToInterface[$lphy]=$lif
+  done < <(listPhyInterfaceMap)
+
+  local -a aMonitors=()
+  mapfile -t aMonitors < <(iw dev | awk '/Interface/{print $2}' | grep -E '^mon[0-9]+$')
+
+  # Bring down any online monitor interfaces and delete them.
+  for monIf in "${aMonitors[@]}"; do
+    local monPhy
+    monPhy=$(iw dev "$monIf" info 2>/dev/null | awk '/wiphy/{print "phy"$2}')
+
+    sudo ip link show "$monIf" | grep -w UP >/dev/null && sudo ip link set "$monIf" down
+    sudo iw dev "$monIf" del
+
+    # Restore the linked interface to managed.
+    local parentInt="${aPhyToInterface[$monPhy]:-}"
+    if [[ -n "$parentInt" ]]; then
+      sudo iw "$parentInt" set type managed
+      sudo ip link set "$parentInt" up
+      sudo nmcli device set "$parentInt" managed yes 2>/dev/null
+
+      if [[ "$verbose" == "true" ]]; then
+        err "Removed monitor interface $monIf, restored $parentInt to managed"
+      fi
+    elif [[ "$verbose" == "true" ]]; then
+      err "Removed monitor interface $monIf (no parent interface found to restore)"
+    fi
+  done
+}
+
+##############################################################################################################
+#
+# monitorList()
+#
+##############################################################################################################
+function monitorList() {
+  listPhyInterfaceMap
+}
+
+function monitorUsage() {
+  echo "Usage: $(basename "$0") monitor <enable|disable|list> [options]"
+  echo "  enable  [-i <interface>] [-n] [-v] : create monitor-mode interfaces"
+  echo "          -i <interface>: Operate on a single interface, e.g. -i wlan1."
+  echo "          -n: Ignore the internal interface, to keep a network connection up during capture."
+  echo "  disable [-v]                       : remove monitor-mode interfaces, restore managed mode"
+  echo "  list                                : list phy/interface mappings"
+}
+
+function monitorMain() {
+  local action="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$action" in
+    enable) monitorEnable "$@" ;;
+    disable) monitorDisable "$@" ;;
+    list) monitorList ;;
+    *) monitorUsage; return 1 ;;
+  esac
+}
+
+##############################################################################################################
+#
+# freqCalc() / freqChannel()
+#
+# Convert between channel number and center frequency for a given band.
+#
+##############################################################################################################
+function freqCalc() {
+  local OPTIND=1
+  local channel='' band='24' verbose='false' flag freq
+
+  while getopts "c:b:v" flag; do
+    case "${flag}" in
+      c) channel="${OPTARG}" ;;
+      b) band="${OPTARG}" ;;
+      v) verbose='true' ;;
+      *) err "Invalid option: ${flag}"; return 1 ;;
+    esac
+  done
+
+  if [[ -z "$channel" ]]; then
+    err "-c <channel> is required."
+    return 1
+  fi
+
+  freq=$(calcCenterFreq "$channel" "$band") || return 1
+
+  if [[ "$verbose" == "true" ]]; then
+    err "Frequency == $freq"
+  else
+    echo "$freq"
+  fi
+}
+
+function freqChannel() {
+  local OPTIND=1
+  local frequency='' band='24' verbose='false' flag channel
+
+  while getopts "f:b:v" flag; do
+    case "${flag}" in
+      f) frequency="${OPTARG}" ;;
+      b) band="${OPTARG}" ;;
+      v) verbose='true' ;;
+      *) err "Invalid option: ${flag}"; return 1 ;;
+    esac
+  done
+
+  if [[ -z "$frequency" ]]; then
+    err "-f <frequency> is required."
+    return 1
+  fi
+
+  channel=$(getChannelFromFrequency "$frequency" "$band") || return 1
+
+  if [[ "$verbose" == "true" ]]; then
+    err "Channel == $channel"
+  else
+    echo "$channel"
+  fi
+}
+
+function freqUsage() {
+  echo "Usage: $(basename "$0") freq <calc|channel> [options]"
+  echo "  calc    -c <channel> -b <band> [-v]    : compute center frequency for a channel"
+  echo "  channel -f <frequency> -b <band> [-v]  : compute channel number for a frequency"
+  echo "  Bands: 24, 5, 6"
+}
+
+function freqMain() {
+  local action="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$action" in
+    calc) freqCalc "$@" ;;
+    channel) freqChannel "$@" ;;
+    *) freqUsage; return 1 ;;
+  esac
+}
+
+##############################################################################################################
+#
+# channelSet()
+#
+# Set the operating frequency for a monitor-mode phy, given a channel and
+# band via calcCenterFreq (instead of a hardcoded channel table).
+#
+##############################################################################################################
+function channelUsage() {
+  echo "Usage: $(basename "$0") channel set -p <phy> -c <channel> [options]"
+  echo "  -p <phy>: Physical interface to set the frequency on, e.g. phy0. Required."
+  echo "  -c <channel>: Channel number to derive the control frequency from. Required."
+  echo "  -b <band>: Band the channel belongs to. Options are 24,5,6. Default: 5."
+  echo "  -w <width>: Channel width in MHz, e.g. 20,40,80,160. Default: 20."
+  echo "  -F <center freq>: Center frequency of the whole bonded channel. Required if"
+  echo "     -w is greater than 20, since it can't be derived from the channel alone."
+  echo "  -v: Use verbose output."
+}
+
+function channelSet() {
+  local OPTIND=1
+  local phyInt='' channel='' band='5' width='20' centerFreq1='' verbose='false' flag controlFreq
+
+  while getopts "p:c:b:w:F:v" flag; do
+    case "${flag}" in
+      p) phyInt="${OPTARG}" ;;
+      c) channel="${OPTARG}" ;;
+      b) band="${OPTARG}" ;;
+      w) width="${OPTARG}" ;;
+      F) centerFreq1="${OPTARG}" ;;
+      v) verbose='true' ;;
+      *) err "Invalid option: ${flag}"; return 1 ;;
+    esac
+  done
+
+  if [[ -z "$phyInt" || -z "$channel" ]]; then
+    err "Both -p <phy> and -c <channel> are required."
+    channelUsage
+    return 1
+  fi
+
+  if [[ "$width" -gt 20 && -z "$centerFreq1" ]]; then
+    err "-F <center freq> is required for channel widths greater than 20 MHz."
+    return 1
+  fi
+
+  controlFreq=$(calcCenterFreq "$channel" "$band") || return 1
+
+  if [[ "$verbose" == "true" ]]; then
+    err "Setting $phyInt to control freq $controlFreq, width $width${centerFreq1:+, center1 $centerFreq1}"
+  fi
+
+  if [[ -n "$centerFreq1" ]]; then
+    sudo iw phy "$phyInt" set freq "$controlFreq" "$width" "$centerFreq1"
+  else
+    sudo iw phy "$phyInt" set freq "$controlFreq" "$width"
+  fi
+}
+
+function channelMain() {
+  local action="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$action" in
+    set) channelSet "$@" ;;
+    *) channelUsage; return 1 ;;
+  esac
+}
+
+##############################################################################################################
+#
+# scanRun()
+#
+# Trigger a scan via wpa_cli and print the results.
+#
+##############################################################################################################
+function scanRun() {
+  local OPTIND=1
+  local iface='wlan0' flag
+
+  while getopts "i:" flag; do
+    case "${flag}" in
+      i) iface="${OPTARG}" ;;
+      *) err "Invalid option: ${flag}"; return 1 ;;
+    esac
+  done
+
+  sudo wpa_cli -i "$iface" scan 2>/dev/null
+  sudo wpa_cli -i "$iface" scan_results 2>/dev/null
+}
+
+##############################################################################################################
+#
+# showHelp()
+#
+##############################################################################################################
+function showHelp() {
+  echo "*******************************************************************************"
+  echo "$(basename "$0") manages 802.11 monitor mode capture on Linux.                  "
+  echo "*******************************************************************************"
+  echo "Usage: $(basename "$0") <command> <subcommand> [options]"
+  echo ""
+  echo "Commands:"
+  echo "  monitor enable  [-i <interface>] [-n] [-v]    Create monitor-mode interfaces."
+  echo "  monitor disable [-v]                          Remove monitor-mode interfaces."
+  echo "  monitor list                                  List phy/interface mappings."
+  echo "  freq calc       -c <channel> -b <band> [-v]   Channel -> center frequency."
+  echo "  freq channel    -f <frequency> -b <band> [-v] Frequency -> channel."
+  echo "  channel set     -p <phy> -c <channel> [-b <band>] [-w <width>] [-F <freq>] [-v]"
+  echo "                                                 Set the operating frequency on a phy."
+  echo "  scan            [-i <interface>]              Trigger a wpa_cli scan and print results."
+  echo ""
+  echo "Run without arguments, or with -h/--help, to show this message."
+  echo ""
+}
+
+###############################################################################
+################################# MAIN ########################################
+###############################################################################
+
+command="${1:-}"
+[[ $# -gt 0 ]] && shift
+
+case "$command" in
+  monitor) monitorMain "$@" ;;
+  freq) freqMain "$@" ;;
+  channel) channelMain "$@" ;;
+  scan) scanRun "$@" ;;
+  -h|--help|help|"") showHelp ;;
+  *) err "Unknown command: $command"; showHelp; exit 1 ;;
+esac

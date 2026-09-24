@@ -2,12 +2,13 @@
 Personal scripts used to manage capturing WiFi data on Linux
 
 # Files
-- lib/wifi-common.sh : shared functions (err, calcCenterFreq, getChannelFromFrequency, listPhyInterfaceMap)
-                sourced by fqzoid, setchannel, and setmonitor. Not meant to be run directly.
-- fqzoid      : script to calculate frequencies and channels for various bands.
-- setchannel  : script to set the operating frequency for a monitor-mode phy, given a channel/band
-                (and, for widths above 20 MHz, an explicit center frequency).
-- setmonitor  : main script to enable monitor mode on available or specified wlan interfaces. Ultimately it will become a single 
-                script to also set channels and initiate captures.
-- wifiscan    : quick wrapper to initiate wifi scans using wlan0.
-- listphy.sh  : quick script to list the physical interfaces and their mapping to wlan interfaces.
+- wifictl : single entry point for managing 802.11 monitor mode capture. Subcommands:
+  - `wifictl monitor enable [-i <interface>] [-n] [-v]` : create monitor-mode interfaces
+  - `wifictl monitor disable [-v]`                       : remove monitor-mode interfaces, restore managed mode
+  - `wifictl monitor list`                               : list phy/interface mappings
+  - `wifictl freq calc -c <channel> -b <band> [-v]`      : channel -> center frequency
+  - `wifictl freq channel -f <frequency> -b <band> [-v]` : frequency -> channel
+  - `wifictl channel set -p <phy> -c <channel> [-b <band>] [-w <width>] [-F <center freq>] [-v]` : set the operating frequency on a phy
+  - `wifictl scan [-i <interface>]`                      : trigger a wpa_cli scan and print results
+
+  Run `wifictl` with no arguments (or `-h`/`--help`) for the full usage summary.
