@@ -15,4 +15,5 @@ Personal scripts used to manage capturing WiFi data on Linux
 
   `channel set` and `scan -b` both check the target phy against the requested band before
   issuing any commands (via `iw phy <phy> info`), and print the phy's current regulatory
-  domain (via `iw reg get`) if the band isn't supported/usable.
+  domain (via `iw reg get`) if the band isn't supported/usable. On an interactive terminal,
+  they'll then offer to set a different country domain (`iw reg set <CC>`) and retry.
