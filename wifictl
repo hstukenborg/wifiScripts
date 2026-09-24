@@ -139,6 +139,31 @@ function nextFreeMonitorName() {
 
 ##############################################################################################################
 #
+# isUsbInterface()
+#
+# True if the given network interface is attached via USB. Built-in wifi is
+# almost always PCI (or SDIO on some ARM boards); external adapters plugged
+# in specifically for capture are almost always USB. This is what -n uses to
+# tell "internal" from "external" -- enumeration order in `iw dev`/listPhy*
+# has no defined relationship to which physical slot an adapter is in, so it
+# can't be used for this (confirmed: on one test host, `iw dev` listed the
+# external USB adapter's phy before the internal PCI one's).
+#
+# Fails closed: if the bus type can't be determined, the interface is
+# treated as NOT USB (i.e. as if it were internal), since -n's whole purpose
+# is to protect connectivity -- an interface it can't identify should be
+# left alone, not converted.
+#
+##############################################################################################################
+function isUsbInterface() {
+  local lIf=$1
+  local subsystem
+  subsystem=$(basename "$(readlink -f "/sys/class/net/${lIf}/device/subsystem" 2>/dev/null)" 2>/dev/null)
+  [[ "$subsystem" == "usb" ]]
+}
+
+##############################################################################################################
+#
 # bandFreqRange()
 #
 # Print "<min> <max>" MHz bounds for a band. Shared by scan's band filter and
@@ -551,15 +576,28 @@ function monitorEnable() {
       return 1
     fi
     aOrder=("$singleInterface")
-  elif [[ "$noInternal" == "true" && ${#aOrder[@]} -gt 0 ]]; then
-    # Assume the first managed interface `iw dev` reports is the internal
-    # adapter, and skip it so the primary network connection survives the capture.
-    aOrder=("${aOrder[@]:1}")
+  elif [[ "$noInternal" == "true" ]]; then
+    # Keep only USB-attached (external) interfaces, so the built-in adapter's
+    # network connection survives the capture. See isUsbInterface for why
+    # this replaces the old "skip whichever one iw dev lists first" guess.
+    local -a aExternal=()
+    for lif in "${aOrder[@]}"; do
+      isUsbInterface "$lif" && aExternal+=("$lif")
+    done
+    aOrder=("${aExternal[@]}")
+
+    if [[ ${#aOrder[@]} -eq 0 ]]; then
+      err "No external (USB) interfaces found; nothing to enable with -n."
+    fi
   fi
 
   if [[ "$verbose" == "true" ]]; then
     for lif in "${aOrder[@]}"; do
-      err "$lif is ${aMappedInterfaces[$lif]}"
+      if isUsbInterface "$lif"; then
+        err "$lif is ${aMappedInterfaces[$lif]} (usb)"
+      else
+        err "$lif is ${aMappedInterfaces[$lif]} (not usb)"
+      fi
     done
   fi
 
@@ -724,9 +762,12 @@ function monitorUsage() {
   echo "    Create monitor-mode interfaces."
   echo "    -i <interface>: Operate on this single interface only, e.g. -i wlan1."
   echo "                    Default: all interfaces reported by iw dev."
-  echo "    -n: Skip the internal interface (the first managed interface iw dev reports),"
-  echo "        so its network connection stays up during capture."
-  echo "    -v: Print the interface/phy mapping and each step as it runs."
+  echo "    -n: Only use USB-attached (external) interfaces, so the built-in adapter's"
+  echo "        network connection stays up during capture. Built-in wifi is almost"
+  echo "        always PCI/SDIO, not USB; an interface whose bus type can't be"
+  echo "        determined is treated as internal and skipped."
+  echo "    -v: Print the interface/phy mapping (and usb/not-usb classification) and"
+  echo "        each step as it runs."
   echo "    -C <specs>: Set a channel per interface as it's enabled. Comma-separated"
   echo "                list of <interface>=<channel>:<band>[:<width>[:<centerfreq>]],"
   echo "                e.g. -C \"wlan0=6:24,wlan1=36:5:80\". The center frequency for"
