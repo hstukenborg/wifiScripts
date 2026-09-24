@@ -18,3 +18,6 @@ Personal scripts used to manage capturing WiFi data on Linux
   issuing any commands (via `iw phy <phy> info`), and print the phy's current regulatory
   domain (via `iw reg get`) if the band isn't supported/usable. On an interactive terminal,
   they'll then offer to set a different country domain (`iw reg set <CC>`) and retry.
+
+- iwoutput.txt : sample real-world `iw phy` output (multiple phys, 2.4/5/6 GHz), used as a
+  fixture to validate wifictl's band-detection parsing against actual Linux formatting.
