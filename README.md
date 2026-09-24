@@ -12,3 +12,7 @@ Personal scripts used to manage capturing WiFi data on Linux
   - `wifictl scan [-i <interface>] [-b <band>] [-s <ssid>]` : trigger a wpa_cli scan, optionally filtered by band (24,5,6) and/or SSID substring
 
   Run `wifictl` with no arguments (or `-h`/`--help`) for the full usage summary.
+
+  `channel set` and `scan -b` both check the target phy against the requested band before
+  issuing any commands (via `iw phy <phy> info`), and print the phy's current regulatory
+  domain (via `iw reg get`) if the band isn't supported/usable.

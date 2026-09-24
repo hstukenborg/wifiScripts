@@ -102,6 +102,105 @@ function listPhyInterfaceMap() {
 
 ##############################################################################################################
 #
+# bandFreqRange()
+#
+# Print "<min> <max>" MHz bounds for a band. Shared by scan's band filter and
+# checkBandSupported.
+#
+##############################################################################################################
+function bandFreqRange() {
+  local lBand=$1
+
+  case "${lBand}" in
+    24) echo "2400 2495" ;;
+    5) echo "5000 5895" ;;
+    6) echo "5925 7125" ;;
+    *) err "Invalid band: $lBand"; return 1 ;;
+  esac
+}
+
+##############################################################################################################
+#
+# phyForInterface()
+#
+# Print the phy (e.g. "phy0") that owns the given interface, via
+# listPhyInterfaceMap. Fails if the interface isn't found.
+#
+##############################################################################################################
+function phyForInterface() {
+  local lIf=$1
+
+  listPhyInterfaceMap | awk -F= -v want="$lIf" '$2 == want { print $1; found=1 } END { exit !found }'
+}
+
+##############################################################################################################
+#
+# printPhyRegDomain()
+#
+# Print the current regulatory domain for a phy: its self-managed domain if
+# `iw reg get` reports one, otherwise the global domain.
+#
+##############################################################################################################
+function printPhyRegDomain() {
+  local lPhy=$1
+  local phyTag="${lPhy/phy/phy#}"
+  local domain
+
+  domain=$(iw reg get 2>/dev/null | awk -v tag="${phyTag} (self-managed)" '
+    $0 == tag { found=1; next }
+    found && /^country/ { print; exit }
+  ')
+
+  if [[ -z "$domain" ]]; then
+    domain=$(iw reg get 2>/dev/null | awk '
+      $0 == "global" { found=1; next }
+      found && /^country/ { print; exit }
+    ')
+  fi
+
+  if [[ -n "$domain" ]]; then
+    err "Current regulatory domain for $lPhy: $domain"
+  else
+    err "Could not determine regulatory domain for $lPhy."
+  fi
+}
+
+##############################################################################################################
+#
+# checkBandSupported()
+#
+# Verify the phy actually advertises a usable (non-disabled) frequency within
+# the given band's range, via `iw phy <phy> info`. If it doesn't -- because
+# the driver/hardware doesn't support the band, or the band is disabled by
+# the current regulatory domain -- print the phy's current regulatory domain
+# and fail, so callers can bail out before issuing commands the driver will
+# reject anyway.
+#
+##############################################################################################################
+function checkBandSupported() {
+  local lPhy=$1 lBand=$2
+  local range freqMin freqMax
+
+  range=$(bandFreqRange "$lBand") || return 1
+  freqMin=${range% *}
+  freqMax=${range#* }
+
+  if ! iw phy "$lPhy" info 2>/dev/null | awk -v fmin="$freqMin" -v fmax="$freqMax" '
+    /^[[:space:]]*\*[[:space:]]*[0-9]+ MHz/ {
+      freq = $2
+      disabled = ($0 ~ /\(disabled\)/)
+      if (freq >= fmin && freq <= fmax && !disabled) { found=1; exit }
+    }
+    END { exit !found }
+  '; then
+    err "$lPhy does not appear to support band $lBand (no usable frequency in range)."
+    printPhyRegDomain "$lPhy"
+    return 1
+  fi
+}
+
+##############################################################################################################
+#
 # monitorEnable()
 #
 # Create monitor interfaces for the specified physical interfaces.
@@ -410,6 +509,8 @@ function channelSet() {
     return 1
   fi
 
+  checkBandSupported "$phyInt" "$band" || return 1
+
   controlFreq=$(calcCenterFreq "$channel" "$band") || return 1
 
   if [[ "$verbose" == "true" ]]; then
@@ -469,12 +570,14 @@ function scanRun() {
 
   local freqMin='' freqMax=''
   if [[ -n "$band" ]]; then
-    case "$band" in
-      24) freqMin=2400; freqMax=2495 ;;
-      5) freqMin=5000; freqMax=5895 ;;
-      6) freqMin=5925; freqMax=7125 ;;
-      *) err "Invalid band: $band"; return 1 ;;
-    esac
+    local range
+    range=$(bandFreqRange "$band") || return 1
+    freqMin=${range% *}
+    freqMax=${range#* }
+
+    local ifPhy
+    ifPhy=$(phyForInterface "$iface") || { err "Could not determine phy for interface $iface."; return 1; }
+    checkBandSupported "$ifPhy" "$band" || return 1
   fi
 
   if [[ "$verbose" == "true" ]]; then
